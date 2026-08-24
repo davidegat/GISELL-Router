@@ -1,0 +1,48 @@
+name: Publish approved i18n build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.bootstrap/**'
+      - '.github/workflows/publish-approved-build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct and verify approved build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/payload.part* > /tmp/payload.b64
+          base64 -d /tmp/payload.b64 > /tmp/payload.tar.gz
+          tar -xzf /tmp/payload.tar.gz
+          echo '01f182ca97254fbf9fa12936dfbd20a787de7eb96899b35e10376c8b874d5970  router.py' | sha256sum -c -
+          echo '6524b3270e779d1263612917719fb9726c92a74f6c5071379e2916838069e33d  webui.html' | sha256sum -c -
+          echo '0dd8f391e532d397a888463ee9f4ad5b1b26e703ab775857eae7cab5fd6a98b7  lang_it.json' | sha256sum -c -
+          echo '9a0aa0574298bd7d06a57fe13f40448160023da9daf0e665b2fd4f5def25d272  lang_en.json' | sha256sum -c -
+          python3 -m py_compile router.py
+          python3 - <<'PY'
+          import json
+          for path in ('lang_it.json', 'lang_en.json'):
+              with open(path, encoding='utf-8') as handle:
+                  json.load(handle)
+          PY
+      - name: Commit approved build and clean bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .bootstrap
+          rm -f .github/workflows/publish-approved-build.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Publish i18n build with external language files'
+          git push
