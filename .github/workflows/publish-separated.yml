@@ -1,16 +1,15 @@
 name: Publish approved separated build
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.publish/trigger'
+  issues:
+    types: [opened]
 
 permissions:
   contents: write
 
 jobs:
   publish:
+    if: github.event.issue.title == 'GISELL_RELEASE_TRIGGER_914aaacf'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
