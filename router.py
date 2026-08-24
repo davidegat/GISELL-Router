@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -52,6 +53,41 @@ APP_AUTHOR = "Davide (gat)"
 APP_LICENSE = "CC BY-NC 4.0"
 SERVICE_NAME = "gisell-router.service"
 
+LANG_IT_PATH = APP_DIR / "lang_it.json"
+LANG_EN_PATH = APP_DIR / "lang_en.json"
+
+
+def _load_language_pack(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read language file {path.name}: {exc}") from exc
+    if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+        raise RuntimeError(f"Invalid language file: {path.name}")
+    return data
+
+
+LANGUAGE_PACKS = {
+    "it": _load_language_pack(LANG_IT_PATH),
+    "en": _load_language_pack(LANG_EN_PATH),
+}
+_REQUEST_LANGUAGE: ContextVar[str] = ContextVar("gisell_request_language", default="it")
+
+
+def _normalize_language(value: str | None) -> str:
+    raw = (value or "").lower()
+    return "en" if raw.startswith("en") else "it"
+
+
+def text(key: str, /, **params: Any) -> str:
+    lang = _REQUEST_LANGUAGE.get()
+    template = LANGUAGE_PACKS.get(lang, LANGUAGE_PACKS["it"]).get(key, LANGUAGE_PACKS["it"].get(key, key))
+    try:
+        return template.format(**params)
+    except (KeyError, ValueError):
+        return template
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "settings": {
@@ -79,65 +115,77 @@ DEFAULT_CONFIG: dict[str, Any] = {
 PRESETS: dict[str, dict[str, Any]] = {
     "openrouter": {
         "label": "OpenRouter",
+        "label_key": "provider.template.openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "needs_key": True,
     },
     "groq": {
         "label": "Groq",
+        "label_key": "provider.template.groq",
         "base_url": "https://api.groq.com/openai/v1",
         "needs_key": True,
     },
     "openai": {
         "label": "OpenAI",
+        "label_key": "provider.template.openai",
         "base_url": "https://api.openai.com/v1",
         "needs_key": True,
     },
     "google_ai_studio": {
         "label": "Google AI Studio",
+        "label_key": "provider.template.google",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "needs_key": True,
-        "note": "Usa una Gemini API key creata in Google AI Studio. Endpoint OpenAI-compatible ufficiale di Google.",
+        "note_key": "provider.google_note",
     },
     "mistral": {
         "label": "Mistral",
+        "label_key": "provider.template.mistral",
         "base_url": "https://api.mistral.ai/v1",
         "needs_key": True,
     },
     "together": {
         "label": "Together",
+        "label_key": "provider.template.together",
         "base_url": "https://api.together.ai/v1",
         "needs_key": True,
     },
     "deepinfra": {
         "label": "DeepInfra",
+        "label_key": "provider.template.deepinfra",
         "base_url": "https://api.deepinfra.com/v1/openai",
         "needs_key": True,
     },
     "fireworks": {
         "label": "Fireworks AI",
+        "label_key": "provider.template.fireworks",
         "base_url": "https://api.fireworks.ai/inference/v1",
         "needs_key": True,
     },
     "cerebras": {
         "label": "Cerebras",
+        "label_key": "provider.template.cerebras",
         "base_url": "https://api.cerebras.ai/v1",
         "needs_key": True,
     },
     "ollama": {
-        "label": "Ollama locale (anche modelli cloud)",
+        "label": "Ollama",
+        "label_key": "provider.template.ollama",
         "base_url": "http://127.0.0.1:11434/v1",
         "needs_key": False,
     },
     "codex": {
-        "label": "Codex / ChatGPT (login OAuth)",
+        "label": "Codex / ChatGPT",
+        "label_key": "provider.template.codex",
         "base_url": "https://chatgpt.com/backend-api/codex",
         "needs_key": False,
         "auth_mode": "codex_oauth",
         "wire": "codex",
-        "note": "Richiede 'codex login'. Endpoint interno non documentato: usalo solo con il tuo account.",
+        "note_key": "provider.codex_note",
     },
     "custom": {
-        "label": "Custom OpenAI-compatible",
+        "label": "custom",
+        "label_key": "provider.template.custom",
         "base_url": "",
         "needs_key": False,
     },
@@ -333,14 +381,17 @@ store = Store()
 
 def append_session_log(
     level: str,
-    message: str,
+    message_key: str,
     *,
     kind: str = "system",
     route_id: str | None = None,
     request_id: str | None = None,
+    message_params: dict[str, Any] | None = None,
     detail: str | None = None,
+    detail_key: str | None = None,
+    detail_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Aggiunge una riga al log live della sessione, arricchita con route/provider."""
+    """Append a language-neutral event to the in-memory session log."""
     store._log_seq += 1
     route = store.route(route_id) if route_id else None
     provider = store.provider(route["provider_id"]) if route else None
@@ -349,8 +400,11 @@ def append_session_log(
         "at": time.time(),
         "level": str(level),
         "kind": str(kind),
-        "message": str(message),
+        "message_key": str(message_key),
+        "message_params": message_params or {},
         "detail": str(detail) if detail else None,
+        "detail_key": str(detail_key) if detail_key else None,
+        "detail_params": detail_params or {},
         "request_id": request_id,
         "route_id": route_id,
         "label": (route.get("label") or route.get("model")) if route else None,
@@ -361,7 +415,7 @@ def append_session_log(
     return entry
 
 
-append_session_log("info", "Router avviato", kind="system")
+append_session_log("info", "log.router_started", kind="system")
 
 
 @asynccontextmanager
@@ -389,6 +443,15 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Router-Route", "X-Router-Model", "X-Router-Provider"],
 )
+
+@app.middleware("http")
+async def language_context_middleware(request: Request, call_next):
+    token = _REQUEST_LANGUAGE.set(_normalize_language(request.headers.get("Accept-Language")))
+    try:
+        return await call_next(request)
+    finally:
+        _REQUEST_LANGUAGE.reset(token)
+
 
 
 class ProviderCreate(BaseModel):
@@ -524,7 +587,7 @@ def models_payload() -> dict[str, Any]:
                 "object": "model",
                 "created": created,
                 "owned_by": "local-llm-router",
-                "description": "Failover automatico su tutti i modelli configurati",
+                "description": text("api.model_router_description"),
             }
         )
     for entry in exposed_models():
@@ -538,7 +601,7 @@ def models_payload() -> dict[str, Any]:
                     "object": "model",
                     "created": created,
                     "owned_by": "local-llm-router",
-                    "description": f"Preset: failover in ordine su {n} modell{'o' if n == 1 else 'i'}",
+                    "description": text("api.preset_description", count=n),
                     "root": entry["exposed_id"],
                     "parent": None,
                     "permission": [],
@@ -859,17 +922,16 @@ class CodexAuth:
     def _load_from_disk(self) -> None:
         if not self.path.exists():
             raise CodexAuthError(
-                f"{self.path} non trovato. Esegui 'codex login' su questa macchina."
+                text("error.codex_auth_missing", path=self.path)
             )
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
-            raise CodexAuthError(f"Impossibile leggere {self.path}: {exc}") from exc
+            raise CodexAuthError(text("error.codex_auth_read", path=self.path, error=exc)) from exc
         tokens = raw.get("tokens") if isinstance(raw, dict) else None
         if not isinstance(tokens, dict) or not tokens.get("access_token"):
             raise CodexAuthError(
-                "auth.json non contiene un access_token: sei loggato con API key invece che con ChatGPT? "
-                "Esegui 'codex login' scegliendo l'accesso con ChatGPT."
+                text("error.codex_access_token_missing")
             )
         self._raw = raw
         self._access = str(tokens.get("access_token") or "")
@@ -895,7 +957,7 @@ class CodexAuth:
 
     async def _refresh_token(self, client: httpx.AsyncClient) -> None:
         if not self._refresh:
-            raise CodexAuthError("Token scaduto e nessun refresh_token disponibile: rifai 'codex login'.")
+            raise CodexAuthError(text("error.codex_refresh_missing"))
         payload = {
             "client_id": CODEX_CLIENT_ID,
             "grant_type": "refresh_token",
@@ -905,19 +967,17 @@ class CodexAuth:
         try:
             resp = await client.post(CODEX_TOKEN_URL, json=payload, timeout=30.0)
         except httpx.HTTPError as exc:
-            raise CodexAuthError(f"Refresh del token fallito: {exc}") from exc
+            raise CodexAuthError(text("error.codex_refresh_failed", detail=exc)) from exc
         if not resp.is_success:
-            raise CodexAuthError(
-                f"Refresh del token rifiutato (HTTP {resp.status_code}). Rifai 'codex login'."
-            )
+            raise CodexAuthError(text("error.codex_refresh_failed", detail=f"HTTP {resp.status_code}"))
         try:
             data = resp.json()
         except ValueError as exc:
-            raise CodexAuthError("Risposta non JSON dal servizio token") from exc
+            raise CodexAuthError(text("error.codex_token_non_json")) from exc
 
         access = data.get("access_token")
         if not access:
-            raise CodexAuthError("Il servizio token non ha restituito un access_token")
+            raise CodexAuthError(text("error.codex_token_missing"))
         self._access = str(access)
         if data.get("refresh_token"):
             self._refresh = str(data["refresh_token"])
@@ -1209,7 +1269,7 @@ class ResponsesToChatTranslator:
         if kind in {"response.failed", "error"}:
             resp = ev.get("response") if isinstance(ev.get("response"), dict) else ev
             err = resp.get("error") if isinstance(resp, dict) else None
-            self.error = str((err or {}).get("message") if isinstance(err, dict) else err or "errore Codex")
+            self.error = str((err or {}).get("message") if isinstance(err, dict) else err or text("error.codex_generic"))
             self.finished = True
             return [self._chunk({}, finish="stop")]
 
@@ -1296,15 +1356,15 @@ def valid_json_response(endpoint: str, payload: Any) -> tuple[bool, str | None]:
     if endpoint in {"chat/completions", "completions"}:
         choices = payload.get("choices") if isinstance(payload, dict) else None
         if not isinstance(choices, list) or not choices:
-            return False, "Manca choices[]"
+            return False, text("error.choices_missing")
         first = choices[0]
         if not isinstance(first, dict):
-            return False, "choices[0] non valido"
+            return False, text("error.choices_invalid")
         if endpoint == "completions":
-            return (True, None) if first.get("text") is not None else (False, "Manca choices[0].text")
+            return (True, None) if first.get("text") is not None else (False, text("error.choice_text_missing"))
         message = first.get("message")
         if not isinstance(message, dict):
-            return False, "Manca choices[0].message"
+            return False, text("error.choice_message_missing")
         has_content = message.get("content") is not None
         has_tools = bool(message.get("tool_calls") or message.get("function_call"))
                                                                                    
@@ -1312,13 +1372,13 @@ def valid_json_response(endpoint: str, payload: Any) -> tuple[bool, str | None]:
         has_reasoning = bool(message.get("reasoning_content") or message.get("reasoning"))
         has_refusal = message.get("refusal") is not None
         if not (has_content or has_tools or has_reasoning or has_refusal):
-            return False, "Messaggio senza contenuto/tool call"
+            return False, text("error.message_no_content")
         return True, None
 
     if endpoint == "responses":
         if isinstance(payload, dict) and ("output" in payload or "output_text" in payload or payload.get("object") == "response"):
             return True, None
-        return False, "Risposta Responses API non riconosciuta"
+        return False, text("error.responses_unrecognized")
 
     return True, None
 
@@ -1337,7 +1397,7 @@ def mark_failure(route_id: str, error: str, status_code: int | None = None) -> N
     )
     append_session_log(
         "error",
-        "Modello fallito",
+        "log.model_failed",
         kind="failure",
         route_id=route_id,
         detail=final_error,
@@ -1357,8 +1417,9 @@ def mark_success(route_id: str, latency_ms: float) -> None:
     )
     append_session_log(
         "success",
-        f"Risposta valida in {round(latency_ms, 1)} ms",
+        "log.valid_response",
         kind="success",
+        message_params={"ms": round(latency_ms, 1)},
         route_id=route_id,
     )
 
@@ -1398,15 +1459,18 @@ def start_tracking(endpoint: str, streaming: bool, client_model: Any) -> dict[st
         "active_item_id": None,
         "model": None,
         "provider": None,
-        "phase": "in attesa del provider",
+        "phase": "waiting_provider",
+        "failover_index": None,
     }
     store.inflight[entry["id"]] = entry
     append_session_log(
         "info",
-        f"Nuova richiesta {endpoint} · {'streaming' if streaming else 'non streaming'}",
+        "log.new_request",
         kind="request",
         request_id=entry["id"],
-        detail=f"model richiesto dal client: {client_model}" if isinstance(client_model, str) else None,
+        message_params={"endpoint": endpoint, "mode": "streaming" if streaming else "non_streaming"},
+        detail_key="log.client_model" if isinstance(client_model, str) else None,
+        detail_params={"model": client_model} if isinstance(client_model, str) else None,
     )
     return entry
 
@@ -1492,7 +1556,7 @@ async def codex_collect(
         if tr.error:
             return b"", tr.error
         if not tr.text_parts and not tr.tool_calls:
-            return b"", "Nessun contenuto ricevuto da Codex"
+            return b"", text("error.codex_no_content")
         return _json_dumps(tr.aggregate()), None
 
                                                                         
@@ -1500,7 +1564,7 @@ async def codex_collect(
     for ev in reversed(events):
         if ev.get("type") in {"response.completed", "response.incomplete"} and isinstance(ev.get("response"), dict):
             return _json_dumps(ev["response"]), None
-    return b"", "Stream Responses senza evento response.completed"
+    return b"", text("error.codex_completed_event_missing")
 
 
 async def proxy_nonstreaming(
@@ -1508,7 +1572,7 @@ async def proxy_nonstreaming(
 ) -> Response:
     pairs = enabled_route_sequence(preferred)
     if not pairs:
-        raise HTTPException(503, "Nessun modello abilitato nel router")
+        raise HTTPException(503, text("error.no_enabled_models"))
 
     errors: list[str] = []
     client = store.http()
@@ -1532,13 +1596,15 @@ async def proxy_nonstreaming(
                 "active_item_id": active_item_id,
                 "model": route["model"],
                 "provider": provider.get("name", ""),
-                "phase": "in attesa della risposta" if index == 0 else f"failover #{index}",
+                "phase": "waiting_response" if index == 0 else "failover",
+                "failover_index": index if index > 0 else None,
             })
         append_session_log(
             "info",
-            f"Tentativo #{index + 1} su {route.get('label') or route['model']}",
+            "log.attempt",
             kind="attempt",
             route_id=route["id"],
+            message_params={"number": index + 1, "label": route.get("label") or route["model"]},
             request_id=track.get("id") if track is not None else None,
             detail=f"provider={provider.get('name', '')} · model={route['model']} · endpoint={endpoint}",
         )
@@ -1600,14 +1666,14 @@ async def proxy_nonstreaming(
         try:
             payload = response.json()
         except ValueError:
-            mark_failure(route["id"], "Risposta non JSON")
+            mark_failure(route["id"], text("error.response_non_json"))
             record_attempt_failure(route["id"])
-            errors.append(f"{route_display(route, provider)} → Risposta non JSON")
+            errors.append(f"{route_display(route, provider)} → {text('error.response_non_json')}")
             continue
 
         valid, validation_error = valid_json_response(endpoint, payload)
         if not valid:
-            mark_failure(route["id"], validation_error or "Risposta non valida")
+            mark_failure(route["id"], validation_error or text("error.response_invalid"))
             record_attempt_failure(route["id"])
             errors.append(f"{route_display(route, provider)} → {validation_error}")
             continue
@@ -1624,7 +1690,7 @@ async def proxy_nonstreaming(
             headers=route_headers(route, provider),
         )
 
-    return _failure_payload(errors, "Tutti i backend configurati hanno fallito")
+    return _failure_payload(errors, text("error.all_backends_failed"))
 
 
 async def _prime_sse(iterator: AsyncIterator[bytes], first_token_timeout: float) -> bytes:
@@ -1639,7 +1705,7 @@ async def _prime_sse(iterator: AsyncIterator[bytes], first_token_timeout: float)
         try:
             chunk = await asyncio.wait_for(anext(iterator), timeout=remaining)
         except StopAsyncIteration as exc:
-            raise ValueError("Stream chiuso dal provider senza inviare dati") from exc
+            raise ValueError(text("error.stream_closed")) from exc
         if not chunk:
             continue
         buffered.extend(chunk)
@@ -1648,7 +1714,7 @@ async def _prime_sse(iterator: AsyncIterator[bytes], first_token_timeout: float)
         if b"data:" in buffered:
             return bytes(buffered)
         if len(buffered) > 65536:
-            raise ValueError("Stream 2xx senza eventi SSE riconoscibili")
+            raise ValueError(text("error.stream_unrecognized"))
 
 
 async def proxy_streaming(
@@ -1656,7 +1722,7 @@ async def proxy_streaming(
 ) -> Response:
     pairs = enabled_route_sequence(preferred)
     if not pairs:
-        raise HTTPException(503, "Nessun modello abilitato nel router")
+        raise HTTPException(503, text("error.no_enabled_models"))
 
     errors: list[str] = []
     settings = store.config["settings"]
@@ -1683,13 +1749,15 @@ async def proxy_streaming(
                 "active_item_id": active_item_id,
                 "model": route["model"],
                 "provider": provider.get("name", ""),
-                "phase": "in attesa del primo token" if index == 0 else f"failover #{index}",
+                "phase": "waiting_token" if index == 0 else "failover",
+                "failover_index": index if index > 0 else None,
             })
         append_session_log(
             "info",
-            f"Tentativo #{index + 1} su {route.get('label') or route['model']}",
+            "log.attempt",
             kind="attempt",
             route_id=route["id"],
+            message_params={"number": index + 1, "label": route.get("label") or route["model"]},
             request_id=track.get("id") if track is not None else None,
             detail=f"provider={provider.get('name', '')} · model={route['model']} · endpoint={endpoint} · streaming",
         )
@@ -1729,7 +1797,7 @@ async def proxy_streaming(
         remember_success(active_item_id, route["id"], preferred)
         if track is not None:
                                                                                    
-            track["phase"] = "streaming in corso"
+            track["phase"] = "streaming"
             track["_handoff"] = True
 
         translator = ResponsesToChatTranslator(route["model"]) if translate else None
@@ -1773,20 +1841,20 @@ async def proxy_streaming(
             headers=headers,
         )
 
-    return _failure_payload(errors, "Tutti i backend configurati hanno fallito prima dell'inizio dello stream")
+    return _failure_payload(errors, text("error.all_backends_failed_stream"))
 
 
 async def proxy_openai(endpoint: str, request: Request) -> Response:
     require_router_api_key(request)
     raw = await request.body()
     if not raw:
-        raise HTTPException(400, "Body vuoto")
+        raise HTTPException(400, text("error.empty_body"))
     try:
         body = json.loads(raw)
     except ValueError as exc:
-        raise HTTPException(400, f"JSON non valido: {exc}") from exc
+        raise HTTPException(400, text("error.invalid_json", error=exc)) from exc
     if not isinstance(body, dict):
-        raise HTTPException(400, "Il body deve essere un oggetto JSON")
+        raise HTTPException(400, text("error.body_not_object"))
 
     preferred = resolve_requested_route(body.get("model"))
     streaming = body.get("stream") is True
@@ -1819,7 +1887,7 @@ def require_router_api_key(request: Request) -> None:
     if not token or not pysecrets.compare_digest(token, expected):
         raise HTTPException(
             status_code=401,
-            detail="Chiave API del router mancante o non valida",
+            detail=text("error.router_key_invalid"),
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -1847,7 +1915,7 @@ async def model_detail(model_id: str, request: Request) -> dict[str, Any]:
     for item in models_payload()["data"]:
         if item["id"].lower() == model_id.strip().lower():
             return item
-    raise HTTPException(404, f"Modello '{model_id}' non trovato")
+    raise HTTPException(404, text("error.model_not_found", model=model_id))
 
 
 @app.post("/v1/chat/completions")
@@ -1894,9 +1962,9 @@ async def patch_settings(payload: SettingsPatch) -> dict[str, Any]:
 async def codex_status(provider_id: str) -> dict[str, Any]:
     provider = store.provider(provider_id)
     if not provider:
-        raise HTTPException(404, "Provider non trovato")
+        raise HTTPException(404, text("error.provider_not_found"))
     if provider_auth_mode(provider) != "codex_oauth":
-        raise HTTPException(400, "Questo provider non usa il login Codex")
+        raise HTTPException(400, text("error.provider_not_codex"))
     auth = codex_auth_for(provider)
     try:
         await auth.credentials(store.http())
@@ -1945,9 +2013,9 @@ def _service_unit_text() -> str:
 
 def _require_systemd() -> None:
     if not sys.platform.startswith("linux"):
-        raise HTTPException(400, "Funzione disponibile solo su Linux")
+        raise HTTPException(400, text("error.linux_only"))
     if not shutil.which("systemctl"):
-        raise HTTPException(400, "systemctl non disponibile")
+        raise HTTPException(400, text("error.systemctl_unavailable"))
 
 
 def _service_status_sync() -> dict[str, Any]:
@@ -1991,7 +2059,7 @@ async def install_service() -> dict[str, Any]:
     for cmd in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", SERVICE_NAME]):
         cp = await asyncio.to_thread(_run_system, cmd)
         if cp.returncode != 0:
-            raise HTTPException(500, (cp.stderr or cp.stdout or "systemctl fallito").strip())
+            raise HTTPException(500, (cp.stderr or cp.stdout or text("error.systemctl_failed")).strip())
     return await asyncio.to_thread(_service_status_sync)
 
 
@@ -2010,11 +2078,11 @@ async def uninstall_service() -> dict[str, Any]:
 async def enable_linger() -> dict[str, Any]:
     _require_systemd()
     if not shutil.which("loginctl"):
-        raise HTTPException(400, "loginctl non disponibile")
+        raise HTTPException(400, text("error.loginctl_unavailable"))
     user = os.environ.get("USER") or str(os.getuid())
     cp = await asyncio.to_thread(_run_system, ["loginctl", "enable-linger", user])
     if cp.returncode != 0:
-        raise HTTPException(500, (cp.stderr or cp.stdout or "Impossibile abilitare linger").strip())
+        raise HTTPException(500, (cp.stderr or cp.stdout or text("error.enable_linger_failed")).strip())
     return await asyncio.to_thread(_service_status_sync)
 
 
@@ -2022,11 +2090,11 @@ async def enable_linger() -> dict[str, Any]:
 async def disable_linger() -> dict[str, Any]:
     _require_systemd()
     if not shutil.which("loginctl"):
-        raise HTTPException(400, "loginctl non disponibile")
+        raise HTTPException(400, text("error.loginctl_unavailable"))
     user = os.environ.get("USER") or str(os.getuid())
     cp = await asyncio.to_thread(_run_system, ["loginctl", "disable-linger", user])
     if cp.returncode != 0:
-        raise HTTPException(500, (cp.stderr or cp.stdout or "Impossibile disabilitare linger").strip())
+        raise HTTPException(500, (cp.stderr or cp.stdout or text("error.disable_linger_failed")).strip())
     return await asyncio.to_thread(_service_status_sync)
 
 
@@ -2048,6 +2116,7 @@ async def api_live() -> dict[str, Any]:
             "stream": e["stream"],
             "client_model": e["client_model"],
             "phase": e["phase"],
+            "failover_index": e.get("failover_index"),
             "elapsed_ms": round((now - e["started"]) * 1000),
         }
         for e in sorted(store.inflight.values(), key=lambda x: x["started"])
@@ -2104,9 +2173,9 @@ async def add_provider(payload: ProviderCreate) -> dict[str, Any]:
     preset = PRESETS.get(payload.preset, PRESETS["custom"])
     base_url = (payload.base_url or preset["base_url"]).strip().rstrip("/")
     if not base_url:
-        raise HTTPException(400, "Base URL obbligatorio")
+        raise HTTPException(400, text("error.base_url_required"))
     if not base_url.startswith(("http://", "https://")):
-        raise HTTPException(400, "Base URL deve iniziare con http:// o https://")
+        raise HTTPException(400, text("error.base_url_scheme"))
     provider_id = uuid.uuid4().hex[:12]
     provider = {
         "id": provider_id,
@@ -2134,13 +2203,13 @@ async def add_provider(payload: ProviderCreate) -> dict[str, Any]:
 async def patch_provider(provider_id: str, payload: ProviderPatch) -> dict[str, Any]:
     provider = store.provider(provider_id)
     if not provider:
-        raise HTTPException(404, "Provider non trovato")
+        raise HTTPException(404, text("error.provider_not_found"))
     if payload.name is not None:
         provider["name"] = payload.name.strip() or provider["name"]
     if payload.base_url is not None:
         base_url = payload.base_url.strip().rstrip("/")
         if base_url and not base_url.startswith(("http://", "https://")):
-            raise HTTPException(400, "Base URL deve iniziare con http:// o https://")
+            raise HTTPException(400, text("error.base_url_scheme"))
         provider["base_url"] = base_url or provider["base_url"]
     if payload.enabled is not None:
         provider["enabled"] = payload.enabled
@@ -2157,7 +2226,7 @@ async def patch_provider(provider_id: str, payload: ProviderPatch) -> dict[str, 
 @app.delete("/api/providers/{provider_id}")
 async def delete_provider(provider_id: str) -> dict[str, Any]:
     if not store.provider(provider_id):
-        raise HTTPException(404, "Provider non trovato")
+        raise HTTPException(404, text("error.provider_not_found"))
     removed_route_ids = {r["id"] for r in store.config["routes"] if r.get("provider_id") == provider_id}
     store.config["providers"] = [p for p in store.config["providers"] if p["id"] != provider_id]
     store.config["routes"] = [r for r in store.config["routes"] if r.get("provider_id") != provider_id]
@@ -2176,12 +2245,12 @@ async def delete_provider(provider_id: str) -> dict[str, Any]:
 async def add_model(provider_id: str, payload: ModelCreate) -> dict[str, Any]:
     provider = store.provider(provider_id)
     if not provider:
-        raise HTTPException(404, "Provider non trovato")
+        raise HTTPException(404, text("error.provider_not_found"))
     model = payload.model.strip()
     if not model:
-        raise HTTPException(400, "ID modello obbligatorio")
+        raise HTTPException(400, text("error.model_id_required"))
     if any(r.get("provider_id") == provider_id and r.get("model") == model for r in store.config["routes"]):
-        raise HTTPException(409, "Questo modello e' gia' presente per il provider")
+        raise HTTPException(409, text("error.model_duplicate"))
     route = {
         "id": uuid.uuid4().hex[:12],
         "provider_id": provider_id,
@@ -2200,9 +2269,9 @@ def _validated_members(raw: list[str], owner_id: str) -> list[str]:
     """Membri esistenti, senza duplicati, auto-riferimenti o cicli fra preset."""
     by_id = {r["id"]: r for r in store.config["routes"]}
     if any(m not in by_id for m in raw):
-        raise HTTPException(404, "Uno dei modelli indicati non esiste piu'")
+        raise HTTPException(404, text("error.member_missing"))
     if owner_id in raw:
-        raise HTTPException(400, "Ciclo: un preset non puo' contenere se stesso")
+        raise HTTPException(400, text("error.preset_cycle"))
     members = _clean_members(raw, set(by_id), owner_id)
 
                                                                        
@@ -2210,7 +2279,7 @@ def _validated_members(raw: list[str], owner_id: str) -> list[str]:
     while stack:
         mid = stack.pop()
         if mid == owner_id:
-            raise HTTPException(400, "Ciclo: un preset non puo' contenere se stesso")
+            raise HTTPException(400, text("error.preset_cycle"))
         if mid in seen:
             continue
         seen.add(mid)
@@ -2241,7 +2310,7 @@ async def create_preset(payload: PresetCreate) -> dict[str, Any]:
 async def patch_preset(preset_id: str, payload: PresetPatch) -> dict[str, Any]:
     preset = store.route(preset_id)
     if not is_preset(preset):
-        raise HTTPException(404, "Preset non trovato")
+        raise HTTPException(404, text("error.preset_not_found"))
     assert preset is not None
     if payload.label is not None:
         preset["label"] = payload.label.strip() or preset.get("label") or "Preset"
@@ -2256,7 +2325,7 @@ async def patch_preset(preset_id: str, payload: PresetPatch) -> dict[str, Any]:
 @app.delete("/api/routes/{route_id}")
 async def delete_route(route_id: str) -> dict[str, Any]:
     if not store.route(route_id):
-        raise HTTPException(404, "Modello non trovato")
+        raise HTTPException(404, text("error.model_not_found", model=route_id if "route_id" in locals() else ""))
     store.config["routes"] = [r for r in store.config["routes"] if r["id"] != route_id]
                                                                           
     for entry in store.config["routes"]:
@@ -2273,21 +2342,21 @@ async def delete_route(route_id: str) -> dict[str, Any]:
 async def patch_route(route_id: str, payload: RoutePatch) -> dict[str, Any]:
     route = store.route(route_id)
     if not route:
-        raise HTTPException(404, "Modello non trovato")
+        raise HTTPException(404, text("error.model_not_found", model=route_id if "route_id" in locals() else ""))
     if is_preset(route):
-        raise HTTPException(400, "Questa voce e' un preset: usa /api/presets/{id}")
+        raise HTTPException(400, text("error.entry_is_preset", id=route_id))
 
     new_provider_id = route["provider_id"]
     if payload.provider_id is not None and payload.provider_id != route["provider_id"]:
         if not store.provider(payload.provider_id):
-            raise HTTPException(404, "Provider di destinazione non trovato")
+            raise HTTPException(404, text("error.destination_provider_not_found"))
         new_provider_id = payload.provider_id
 
     new_model = route["model"]
     if payload.model is not None:
         new_model = payload.model.strip()
         if not new_model:
-            raise HTTPException(400, "ID modello obbligatorio")
+            raise HTTPException(400, text("error.model_id_required"))
 
     if (new_model, new_provider_id) != (route["model"], route["provider_id"]):
         clash = any(
@@ -2295,7 +2364,7 @@ async def patch_route(route_id: str, payload: RoutePatch) -> dict[str, Any]:
             for r in store.config["routes"]
         )
         if clash:
-            raise HTTPException(409, "Questo modello e' gia' presente per il provider")
+            raise HTTPException(409, text("error.model_duplicate"))
                                                                      
         store.health.pop(route_id, None)
         store.stats.pop(route_id, None)
@@ -2319,7 +2388,7 @@ async def move_route(route_id: str, payload: RouteMove) -> dict[str, Any]:
     routes = store.config["routes"]
     idx = next((i for i, r in enumerate(routes) if r["id"] == route_id), None)
     if idx is None:
-        raise HTTPException(404, "Modello non trovato")
+        raise HTTPException(404, text("error.model_not_found", model=route_id if "route_id" in locals() else ""))
     new_idx = max(0, min(len(routes) - 1, idx + (-1 if payload.direction < 0 else 1)))
     if new_idx != idx:
         routes[idx], routes[new_idx] = routes[new_idx], routes[idx]
@@ -2330,7 +2399,7 @@ async def move_route(route_id: str, payload: RouteMove) -> dict[str, Any]:
 @app.post("/api/routes/{route_id}/activate")
 async def activate_route(route_id: str) -> dict[str, Any]:
     if not store.route(route_id):
-        raise HTTPException(404, "Modello non trovato")
+        raise HTTPException(404, text("error.model_not_found", model=route_id if "route_id" in locals() else ""))
     await set_active(route_id)
     return public_state()
 
@@ -2339,11 +2408,11 @@ async def activate_route(route_id: str) -> dict[str, Any]:
 async def discover_models(provider_id: str) -> dict[str, Any]:
     provider = store.provider(provider_id)
     if not provider:
-        raise HTTPException(404, "Provider non trovato")
+        raise HTTPException(404, text("error.provider_not_found"))
     if provider_wire(provider) == "codex":
                                                                                
                                                                   
-        return {"models": list(CODEX_KNOWN_MODELS), "note": "elenco statico: il backend Codex non espone /models"}
+        return {"models": list(CODEX_KNOWN_MODELS), "note": text("provider.codex_static_models")}
 
     url = _endpoint_url(provider, "models")
     try:
@@ -2352,13 +2421,13 @@ async def discover_models(provider_id: str) -> dict[str, Any]:
     except CodexAuthError as exc:
         raise HTTPException(502, str(exc)) from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"Errore collegamento: {exc}") from exc
+        raise HTTPException(502, text("error.connection", error=exc)) from exc
     if not response.is_success:
-        raise HTTPException(502, f"Il provider ha risposto HTTP {response.status_code}: {response.text[:300]}")
+        raise HTTPException(502, text("error.provider_http", status=response.status_code, detail=response.text[:300]))
     try:
         payload = response.json()
     except ValueError as exc:
-        raise HTTPException(502, "Il provider non ha restituito JSON") from exc
+        raise HTTPException(502, text("error.provider_non_json")) from exc
     if isinstance(payload, dict):
         data = payload.get("data") or payload.get("models") or []
     elif isinstance(payload, list):
@@ -2379,12 +2448,12 @@ async def discover_models(provider_id: str) -> dict[str, Any]:
 async def test_route(route_id: str) -> dict[str, Any]:
     route = store.route(route_id)
     if not route:
-        raise HTTPException(404, "Modello non trovato")
+        raise HTTPException(404, text("error.model_not_found", model=route_id if "route_id" in locals() else ""))
     if is_preset(route):
-        raise HTTPException(400, "Un preset non si testa: testa i suoi membri")
+        raise HTTPException(400, text("error.preset_not_testable"))
     provider = store.provider(route["provider_id"])
     if not provider:
-        raise HTTPException(404, "Provider non trovato")
+        raise HTTPException(404, text("error.provider_not_found"))
 
     body: dict[str, Any] = {
         "model": route["model"],
@@ -2432,11 +2501,11 @@ async def test_route(route_id: str) -> dict[str, Any]:
     try:
         payload = response.json()
     except ValueError:
-        mark_failure(route_id, "Risposta non JSON")
-        return {"ok": False, "error": "Risposta non JSON", "state": public_state()}
+        mark_failure(route_id, text("error.response_non_json"))
+        return {"ok": False, "error": text("error.response_non_json"), "state": public_state()}
     valid, error = valid_json_response("chat/completions", payload)
     if not valid:
-        mark_failure(route_id, error or "Risposta non valida")
+        mark_failure(route_id, error or text("error.response_invalid"))
         return {"ok": False, "error": error, "state": public_state()}
     latency = (time.perf_counter() - started) * 1000
     mark_success(route_id, latency)
@@ -2459,481 +2528,18 @@ async def test_all_routes() -> dict[str, Any]:
     return {"results": summary, "state": public_state()}
 
 
-HTML = r'''<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Local LLM Router</title>
-<style>
-:root{color-scheme:dark;--bg:#111318;--panel:#191c23;--panel2:#222631;--text:#eef1f7;--muted:#9ba4b5;--border:#343a48;--accent:#7aa2f7;--ok:#73daca;--bad:#f7768e;--warn:#e0af68}
-*{box-sizing:border-box} body{margin:0;font:15px system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text)}
-main{max-width:1050px;margin:0 auto;padding:28px 18px 60px}.top{display:flex;gap:16px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap}.title h1{font-size:25px;margin:0 0 5px}.muted{color:var(--muted)}
-.top-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.api{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px 14px;min-width:min(100%,390px)}.api code{color:var(--ok);word-break:break-all}
-button,input,select{font:inherit}button{cursor:pointer;border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:8px;padding:8px 11px}button:hover{border-color:var(--accent)}button.primary{background:var(--accent);color:#10131a;border-color:var(--accent);font-weight:650}button.danger{color:var(--bad)}button.small{padding:5px 8px;font-size:13px}
-section{margin-top:26px}.sectionhead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:11px}.sectionhead h2{font-size:18px;margin:0}.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:15px;margin:10px 0}.provider-head{display:flex;gap:10px;justify-content:space-between;align-items:center;flex-wrap:wrap}.provider-name{font-weight:700}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.models{margin-top:12px;border-top:1px solid var(--border);padding-top:10px}.model{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:8px 0}.model+.model{border-top:1px dashed #2e3440}[hidden]{display:none!important}.tag{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:2px 7px;color:var(--muted);font-size:12px}.tag.ok{color:var(--ok);border-color:#3a665f}.tag.bad{color:var(--bad);border-color:#6b3945}.tag.active{color:var(--accent);border-color:#435d91}.tag.off{opacity:.55}.route{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:10px 5px}.route+.route{border-top:1px solid var(--border)}.prio{color:var(--muted);text-align:center;font-variant-numeric:tabular-nums}.route-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.flash{margin-top:14px;min-height:22px}.flash.ok{color:var(--ok)}.flash.bad{color:var(--bad)}
-code.mid{color:var(--warn);font-size:12.5px;word-break:break-all}
-.live{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-top:18px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
-.live.busy{border-color:var(--accent)}
-.dot{width:11px;height:11px;border-radius:50%;background:var(--muted);flex:none}
-.dot.busy{background:var(--accent);animation:pulse 1s infinite}
-.dot.idle{background:#3f4757}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}
-.live-main{flex:1;min-width:240px}.live-model{font-weight:700;font-size:16px}
-.live-sub{color:var(--muted);font-size:13px;margin-top:3px}
-.stat{font-size:12px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
-.switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
-.switch input{width:16px;height:16px;accent-color:var(--accent)}
-dialog{width:min(620px,calc(100% - 28px));border:1px solid var(--border);border-radius:14px;background:var(--panel);color:var(--text);padding:20px}dialog::backdrop{background:#000a}dialog h3{margin-top:0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field{display:flex;flex-direction:column;gap:6px}.field.full{grid-column:1/-1}.field input,.field select{width:100%;background:#11141a;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.empty{color:var(--muted);padding:18px 4px}.discover{max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:8px;margin-top:10px}.discover button{display:block;width:100%;text-align:left;border:0;border-radius:0;background:transparent}.discover button:hover{background:var(--panel2)}
-.tabs{display:flex;gap:8px;margin-top:22px;border-bottom:1px solid var(--border);padding:0 2px}.tab-btn{border:0;border-bottom:3px solid transparent;border-radius:8px 8px 0 0;background:transparent;padding:11px 16px;color:var(--muted);font-weight:700}.tab-btn:hover{color:var(--text);border-color:var(--border)}.tab-btn.active{color:var(--text);border-bottom-color:var(--accent);background:linear-gradient(180deg,transparent,#7aa2f70d)}
-.tab-panel{display:none}.tab-panel.active{display:block}.log-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:18px 0 10px}.log-window{height:min(64vh,680px);overflow:auto;background:#0d0f14;border:1px solid var(--border);border-radius:12px;padding:8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.log-empty{padding:26px;color:var(--muted);text-align:center}.log-row{display:grid;grid-template-columns:78px 72px minmax(150px,260px) 1fr;gap:9px;padding:8px 7px;border-bottom:1px solid #252a34;align-items:start}.log-row:last-child{border-bottom:0}.log-time{color:var(--muted);font-variant-numeric:tabular-nums}.log-level{font-weight:800;text-transform:uppercase}.log-level.error{color:var(--bad)}.log-level.success{color:var(--ok)}.log-level.info{color:var(--accent)}.log-source{color:#c0caf5;overflow:hidden;text-overflow:ellipsis}.log-message{white-space:pre-wrap;overflow-wrap:anywhere}.log-detail{display:block;color:#c7cbd4;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere}.status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:18px}.status-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:13px 14px;min-width:0}.status-label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}.status-value{font-size:18px;font-weight:750;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.status-detail{color:var(--muted);font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.status-value.ok{color:var(--ok)}.status-value.warn{color:var(--warn)}
-.preset-row{background:#202a42;box-shadow:inset 4px 0 0 var(--accent);border-radius:8px}.preset-members{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}.chip{border:1px solid var(--border);border-radius:999px;padding:2px 9px;font-size:12px;color:var(--muted)}.chip.off{opacity:.45;text-decoration:line-through}.picker{max-height:230px;overflow:auto;border:1px solid var(--border);border-radius:8px}.picker .prow{display:flex;align-items:center;gap:6px;padding:6px 8px;border-bottom:1px solid #252a34}.picker .prow:last-child{border-bottom:0}.picker .pname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.picker .empty{padding:14px;font-size:13px}
-.panel-intro{color:var(--muted);margin-top:8px}.config-model-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
-.api-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.api-box{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}.api-box h3{margin:0 0 8px;font-size:16px}.codebox{display:flex;align-items:center;gap:8px;background:#11141a;border:1px solid var(--border);border-radius:8px;padding:10px 11px;margin-top:8px}.codebox code{color:var(--ok);word-break:break-all;flex:1}.key-value{color:var(--warn)!important}.instructions{line-height:1.55}.instructions ol{padding-left:22px}.instructions li+li{margin-top:5px}pre{white-space:pre-wrap;word-break:break-word;background:#11141a;border:1px solid var(--border);border-radius:8px;padding:12px;color:var(--text);overflow:auto}.auth-on{color:var(--ok);font-weight:700}.auth-off{color:var(--muted);font-weight:700}.footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.service-state{font-weight:700;margin-bottom:8px}
-@media(max-width:800px){.status-grid{grid-template-columns:1fr 1fr}.api-grid{grid-template-columns:1fr}}
-@media(max-width:650px){.grid{grid-template-columns:1fr}.field.full{grid-column:auto}.model{grid-template-columns:1fr}.route{grid-template-columns:34px 1fr}.route-actions{grid-column:1/-1;justify-content:flex-start}.status-grid{grid-template-columns:1fr}.tabs{position:sticky;top:0;z-index:5;background:var(--bg);padding-top:6px}.tab-btn{flex:1}}
-</style>
-</head>
-<body><main>
-<div class="top"><div class="title"><h1>Benvenuto in GISELL Router!</h1><div class="muted">Gisell Is a Simple and Easy LLM Router</div></div><div class="top-tools"><button class="small" id="langBtn" title="Passa all'inglese">EN</button><div class="api"><div class="muted">API locale</div><code id="apiUrl">...</code> <button class="small" id="copyApi">Copia</button></div></div></div>
-<div class="tabs" role="tablist" aria-label="Sezioni router"><button class="tab-btn active" id="tabModelsBtn" data-tab="modelsTab" role="tab" aria-selected="true">Modelli</button><button class="tab-btn" id="tabConfigBtn" data-tab="configTab" role="tab" aria-selected="false">Configurazione</button><button class="tab-btn" id="tabApiBtn" data-tab="apiTab" role="tab" aria-selected="false">API</button><button class="tab-btn" id="tabLogsBtn" data-tab="logsTab" role="tab" aria-selected="false">Log</button></div>
-<div id="flash" class="flash"></div>
+WEBUI_PATH = APP_DIR / "webui.html"
 
-<div class="tab-panel active" id="modelsTab" role="tabpanel" aria-labelledby="tabModelsBtn">
- <div class="live" id="live"><span class="dot idle" id="liveDot"></span><div class="live-main"><div class="live-model" id="liveModel">In attesa di richieste…</div><div class="live-sub" id="liveSub">Nessuna richiesta ancora ricevuta.</div></div><label class="switch" title="Se attivo, il modello scelto qui vince anche se l'agente ne chiede un altro."><input type="checkbox" id="overrideChk"> Forza il modello attivo</label></div>
- <div class="status-grid" id="statusGrid">
-  <div class="status-card"><div class="status-label">Router</div><div class="status-value ok" id="statusRouter">ONLINE</div><div class="status-detail" id="statusUptime">uptime —</div></div>
-  <div class="status-card"><div class="status-label">Modello attivo</div><div class="status-value" id="statusActive">—</div><div class="status-detail" id="statusActiveProvider">—</div></div>
-  <div class="status-card"><div class="status-label">Modelli</div><div class="status-value" id="statusModels">0</div><div class="status-detail" id="statusModelsDetail">0 abilitati</div></div>
-  <div class="status-card"><div class="status-label">Richieste sessione</div><div class="status-value" id="statusRequests">0</div><div class="status-detail" id="statusErrors">0 errori</div></div>
- </div>
- <section><div class="sectionhead"><h2>Ordine dei modelli in uso</h2><div class="row"><span class="muted">Priorità di failover dall’alto verso il basso.</span><button id="testAllBtn">Testa tutti</button></div></div><div class="card" id="routes"></div></section>
-</div>
 
-<div class="tab-panel" id="configTab" role="tabpanel" aria-labelledby="tabConfigBtn">
- <div class="panel-intro">Gestione di provider, endpoint, credenziali e modelli configurati.</div>
- <section><div class="sectionhead"><h2>Provider e modelli</h2><button class="primary" id="addProviderBtn">+ Aggiungi provider</button></div><div id="providers"></div></section>
- <section><div class="sectionhead"><h2>Preset</h2><button class="primary" id="addPresetBtn">+ Aggiungi preset</button></div><div class="muted" style="margin-bottom:4px">Un preset raggruppa più modelli sotto un unico nome. Nell\u2019ordine di failover occupa una posizione come un modello: quando la catena lo raggiunge prova i suoi membri nell\u2019ordine indicato, poi passa alla voce successiva. L\u2019agente lo vede in /v1/models come un modello qualsiasi.</div><div id="presets"></div></section>
- <section><div class="sectionhead"><h2>Avvio automatico Linux</h2></div><div class="api-box"><div class="service-state" id="serviceState">Verifica servizio…</div><div class="muted" id="serviceDetail">Installa GISELL Router come servizio systemd dell’utente. Con linger attivo può partire al boot anche prima del login.</div><div class="row" style="margin-top:14px"><button class="primary" id="installServiceBtn">Installa servizio</button><button class="danger" id="removeServiceBtn">Rimuovi servizio</button><button id="lingerBtn">Abilita avvio al boot</button></div></div></section>
-</div>
+def _load_webui() -> str:
+    try:
+        return WEBUI_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read {WEBUI_PATH.name}: {exc}") from exc
 
-<div class="tab-panel" id="apiTab" role="tabpanel" aria-labelledby="tabApiBtn">
- <div class="panel-intro">Collegamento dei client OpenAI-compatible al router locale e protezione opzionale con chiave API.</div>
- <section>
-  <div class="api-grid">
-   <div class="api-box instructions">
-    <h3>Collegarsi al router</h3>
-    <ol>
-     <li>Imposta come <b>Base URL</b> l'indirizzo indicato qui sotto.</li>
-     <li>Usa <b>router</b> come modello per seguire il modello attivo e il failover configurato.</li>
-     <li id="authInstruction">La chiave API non è richiesta.</li>
-    </ol>
-    <div class="muted">Base URL</div>
-    <div class="codebox"><code id="apiBaseUrl">...</code><button class="small" id="copyApiBase">Copia</button></div>
-    <div class="muted" style="margin-top:14px">Esempio curl</div>
-    <pre id="curlExample"></pre>
-    <div class="muted" style="margin-top:14px">Esempio Python (SDK OpenAI)</div>
-    <pre id="pythonExample"></pre>
-   </div>
-   <div class="api-box">
-    <h3>Chiave API locale</h3>
-    <div id="routerKeyStatus" class="auth-off">Nessuna chiave: accesso libero</div>
-    <div class="muted" style="margin-top:7px">Se crei una chiave, tutte le chiamate OpenAI-compatible al router richiederanno <code>Authorization: Bearer &lt;chiave&gt;</code>. Se la rimuovi, l'autenticazione viene disattivata.</div>
-    <div class="row" style="margin-top:14px"><button class="primary" id="createRouterKey">Crea chiave</button><button class="danger" id="deleteRouterKey">Rimuovi chiave</button></div>
-    <div id="newKeyArea" hidden style="margin-top:16px">
-     <div class="muted">Nuova chiave — copiala ora</div>
-     <div class="codebox"><code class="key-value" id="newRouterKey"></code><button class="small" id="copyRouterKey">Copia</button></div>
-     <div class="muted" style="margin-top:7px">Per sicurezza la chiave salvata non viene mostrata di nuovo dopo il reload. Puoi sempre rimuoverla o generarne una nuova.</div>
-    </div>
-   </div>
-  </div>
- </section>
-</div>
 
-<div class="tab-panel" id="logsTab" role="tabpanel" aria-labelledby="tabLogsBtn">
- <div class="panel-intro">Log live della sessione corrente: richieste, tentativi, failover, risposte valide ed errori restituiti dai modelli/provider.</div>
- <div class="log-toolbar">
-  <div><b>Eventi sessione</b> <span class="muted" id="logCount">0 righe</span></div>
-  <div class="row"><label class="switch"><input type="checkbox" id="logAutoScroll" checked> Auto-scroll</label><button class="danger" id="clearLogsBtn">Cancella log</button></div>
- </div>
- <div class="log-window" id="logWindow"><div class="log-empty" id="logEmpty">Nessun evento registrato.</div></div>
-</div>
+HTML = _load_webui().replace("__GISELL_LANGUAGE_PACKS__", json.dumps(LANGUAGE_PACKS, ensure_ascii=False))
 
-<dialog id="providerDialog"><h3>Aggiungi provider</h3><div class="grid">
-<label class="field"><span>Preset</span><select id="preset"></select></label>
-<label class="field"><span>Nome</span><input id="providerName" placeholder="OpenRouter"></label>
-<label class="field full"><span>Base URL</span><input id="baseUrl" placeholder="https://..."></label>
-<label class="field full" id="apiKeyField"><span>API key</span><input id="apiKey" type="password" placeholder="opzionale per endpoint locali"></label>
-<label class="field full" id="authPathField" hidden><span>Percorso auth.json (vuoto = ~/.codex/auth.json)</span><input id="authPath" placeholder="~/.codex/auth.json"></label>
-</div><div class="muted" id="presetNote" hidden style="margin-top:10px;font-size:13px"></div><div class="dialog-actions"><button data-close="providerDialog">Annulla</button><button class="primary" id="saveProvider">Salva</button></div></dialog>
-
-<dialog id="editModelDialog"><h3>Modifica modello</h3><input type="hidden" id="editRouteId"><div class="grid">
-<label class="field full"><span>Provider</span><select id="editRouteProvider"></select></label>
-<label class="field full"><span>ID modello</span><input id="editRouteModel"></label>
-<label class="field full"><span>Etichetta</span><input id="editRouteLabel"></label>
-</div><div class="muted" style="margin-top:10px;font-size:13px">L'etichetta determina l'id visto dall'agente in /v1/models: se la cambi, aggiorna anche la configurazione del client.</div><div class="dialog-actions"><button data-close="editModelDialog">Annulla</button><button class="primary" id="saveEditModel">Salva</button></div></dialog>
-
-<dialog id="editProviderDialog"><h3>Modifica provider</h3><input type="hidden" id="editProviderId"><div class="grid">
-<label class="field"><span>Nome</span><input id="editProviderName"></label>
-<label class="field"><span>Base URL</span><input id="editProviderUrl"></label>
-<label class="field full"><span>API key</span><input id="editProviderKey" type="password" placeholder="lascia vuoto per non modificare"></label>
-</div><div class="row" style="margin-top:10px"><button class="small danger" id="clearProviderKey">Rimuovi chiave salvata</button></div><div class="dialog-actions"><button data-close="editProviderDialog">Annulla</button><button class="primary" id="saveEditProvider">Salva</button></div></dialog>
-
-<dialog id="modelDialog"><h3 id="modelTitle">Aggiungi modello</h3><input type="hidden" id="modelProviderId"><div class="grid">
-<label class="field full"><span>ID modello</span><input id="modelId" placeholder="es. openai/gpt-oss-120b"></label>
-<label class="field full"><span>Etichetta (opzionale)</span><input id="modelLabel" placeholder="Nome leggibile"></label>
-</div><div class="row" style="margin-top:12px"><button id="discoverModels">Recupera modelli dal provider</button><span class="muted" id="discoverStatus"></span></div><div id="discoverList" class="discover" hidden></div><div class="dialog-actions"><button data-close="modelDialog">Annulla</button><button class="primary" id="saveModel">Aggiungi</button></div></dialog>
-<dialog id="presetDialog"><h3 id="presetTitle">Nuovo preset</h3><input type="hidden" id="presetId"><div class="grid">
-<label class="field full"><span>Nome del preset</span><input id="presetLabel" placeholder="es. Veloci"></label>
-</div><div class="muted" style="margin-top:10px;font-size:13px">Il nome determina l'id visto dall'agente in /v1/models: se lo cambi, aggiorna anche la configurazione del client.</div><div class="dialog-actions"><button data-close="presetDialog">Annulla</button><button class="primary" id="savePreset">Salva</button></div></dialog>
-
-<dialog id="memberDialog"><h3>Aggiungi modello al preset</h3><input type="hidden" id="memberPresetId"><div class="muted" style="margin-bottom:10px;font-size:13px">I membri vengono provati nell'ordine in cui compaiono nel preset; puoi riordinarli dopo con le frecce.</div><div class="picker" id="memberPicker"></div><div class="dialog-actions"><button data-close="memberDialog">Chiudi</button></div></dialog>
-
-<footer class="footer"><span>© 2026 Davide (gat) · CC BY-NC 4.0</span><span>GISELL Router v0.3.0</span></footer>
-
-<script>
-let state=null;
-const $=s=>document.querySelector(s);
-const LANG_KEY='gisell-lang';
-let lang=localStorage.getItem(LANG_KEY)==='en'?'en':'it';
-const originals=new WeakMap();
-const attrOriginals=new WeakMap();
-const EN_REPL=[
- ['Benvenuto in GISELL Router!','Welcome to GISELL Router!'],
- ['API locale','Local API'],['Modelli','Models'],['Configurazione','Configuration'],
- ['In attesa di richieste…','Waiting for requests…'],['Nessuna richiesta ancora ricevuta.','No requests received yet.'],
- ['Forza il modello attivo','Force active model'],['Modello attivo','Active model'],
- ['Richieste sessione','Session requests'],['Ordine dei modelli in uso','Model failover order'],
- ['Priorità di failover dall’alto verso il basso.','Failover priority from top to bottom.'],
- ['Testa tutti','Test all'],['Gestione di provider, endpoint, credenziali e modelli configurati.','Manage configured providers, endpoints, credentials and models.'],
- ['Provider e modelli','Providers and models'],['+ Aggiungi provider','+ Add provider'],['+ Aggiungi preset','+ Add preset'],
- ['Un preset raggruppa più modelli sotto un unico nome. Nell’ordine di failover occupa una posizione come un modello: quando la catena lo raggiunge prova i suoi membri nell’ordine indicato, poi passa alla voce successiva. L’agente lo vede in /v1/models come un modello qualsiasi.','A preset groups multiple models under one name. In the failover order it occupies one position like a model: when reached, its members are tried in order, then routing continues with the next global item. The agent sees it in /v1/models like any other model.'],
- ['Avvio automatico Linux','Linux autostart'],['Verifica servizio…','Checking service…'],
- ['Installa GISELL Router come servizio systemd dell’utente. Con linger attivo può partire al boot anche prima del login.','Install GISELL Router as a user systemd service. With linger enabled it can start at boot even before login.'],
- ['Installa servizio','Install service'],['Rimuovi servizio','Remove service'],['Abilita avvio al boot','Enable boot startup'],['Disabilita avvio al boot','Disable boot startup'],
- ['Collegamento dei client OpenAI-compatible al router locale e protezione opzionale con chiave API.','Connect OpenAI-compatible clients to the local router and optionally protect it with an API key.'],
- ['Collegarsi al router','Connect to the router'],['Imposta come Base URL l’indirizzo indicato qui sotto.','Set the address below as the Base URL.'],
- ['Usa router come modello per seguire il modello attivo e il failover configurato.','Use router as the model to follow the active item and configured failover.'],
- ['La chiave API non è richiesta.','An API key is not required.'],['Esempio curl','curl example'],['Esempio Python (SDK OpenAI)','Python example (OpenAI SDK)'],
- ['Chiave API locale','Local API key'],['Nessuna chiave: accesso libero','No key: open access'],
- ['Se crei una chiave, tutte le chiamate OpenAI-compatible al router richiederanno Authorization: Bearer <chiave>. Se la rimuovi, l’autenticazione viene disattivata.','If you create a key, all OpenAI-compatible calls to the router require Authorization: Bearer <key>. Removing it disables authentication.'],
- ['Crea chiave','Create key'],['Rimuovi chiave','Remove key'],['Nuova chiave — copiala ora','New key — copy it now'],
- ['Per sicurezza la chiave salvata non viene mostrata di nuovo dopo il reload. Puoi sempre rimuoverla o generarne una nuova.','For security, the saved key is not shown again after reload. You can remove it or generate a new one at any time.'],
- ['Log live della sessione corrente: richieste, tentativi, failover, risposte valide ed errori restituiti dai modelli/provider.','Live log for the current session: requests, attempts, failovers, valid responses and model/provider errors.'],
- ['Eventi sessione','Session events'],['Cancella log','Clear log'],['Nessun evento registrato.','No events recorded.'],
- ['Aggiungi provider','Add provider'],['Nome','Name'],['Percorso auth.json (vuoto = ~/.codex/auth.json)','auth.json path (empty = ~/.codex/auth.json)'],
- ['Annulla','Cancel'],['Salva','Save'],['Modifica modello','Edit model'],['Etichetta','Label'],
- ["L'etichetta determina l'id visto dall'agente in /v1/models: se la cambi, aggiorna anche la configurazione del client.","The label determines the id exposed to the agent in /v1/models; if you change it, update the client configuration too."],
- ['Modifica provider','Edit provider'],['lascia vuoto per non modificare','leave empty to keep unchanged'],['Rimuovi chiave salvata','Remove saved key'],
- ['Aggiungi modello','Add model'],['Etichetta (opzionale)','Label (optional)'],['Nome leggibile','Readable name'],['Recupera modelli dal provider','Fetch models from provider'],
- ['Nuovo preset','New preset'],['Nome del preset','Preset name'],['Il nome determina l’id visto dall’agente in /v1/models: se lo cambi, aggiorna anche la configurazione del client.','The name determines the id exposed to the agent in /v1/models; if you change it, update the client configuration too.'],
- ['Aggiungi modello al preset','Add model to preset'],["I membri vengono provati nell'ordine in cui compaiono nel preset; puoi riordinarli dopo con le frecce.",'Members are tried in preset order; you can reorder them later with the arrows.'],['Chiudi','Close'],
- ['Copia','Copy'],['ATTIVO','ACTIVE'],['ERRORE','ERROR'],['NON TESTATO','NOT TESTED'],['DISABILITATO','DISABLED'],
- ['chiave salvata','key saved'],['nessuna chiave','no key'],['login non verificato','login not checked'],['+ Modello','+ Model'],['Modifica','Edit'],['Verifica login','Check login'],['Disabilita','Disable'],['Abilita','Enable'],['Elimina','Delete'],
- ['Nessun provider. Aggiungine uno e poi inserisci uno o più modelli.','No providers. Add one, then add one or more models.'],['Nessun modello configurato.','No models configured.'],['Aggiungi almeno un modello.','Add at least one model.'],['nessun membro','no members'],['modelli utilizzabili','available models'],['id API:','API id:'],['Usa ora','Use now'],
- ['Chiave attiva: autenticazione richiesta','Key active: authentication required'],['Rigenera chiave','Regenerate key'],['Inserisci la chiave API del router nel client.','Enter the router API key in the client.'],['La chiave API non è richiesta; lascia il campo vuoto se il client lo permette.','The API key is not required; leave it empty if the client allows it.'],
- ['righe','rows'],['nessuna richiesta','no requests'],['richieste','requests'],['fallite','failed'],['media','avg'],['ultimo uso','last used'],
- ['inattivo · ultima risposta da','idle · last response from'],['nessun modello richiesto','no model requested'],['risposta singola','single response'],['pronto · la prossima richiesta partirà da','ready · next request will start from'],['nessun modello attivo','no active model'],['errori','errors'],['in corso','in progress'],
- ['Preset creato: aggiungi i modelli con "+ Modello".','Preset created: add models with "+ Model".'],['Preset rinominato.','Preset renamed.'],['Dai un nome al preset.','Give the preset a name.'],['Tutti i modelli sono già nel preset.','All models are already in the preset.'],
- ['Provider salvato.','Provider saved.'],['Modello aggiunto.','Model added.'],['Indirizzo API copiato.','API address copied.'],['Base URL copiata.','Base URL copied.'],['Nuova chiave API creata.','New API key created.'],['Chiave API rimossa: autenticazione disattivata.','API key removed: authentication disabled.'],['Chiave copiata.','Key copied.'],['Log della sessione cancellato.','Session log cleared.'],['Login Codex valido.','Codex login valid.'],['Modello impostato come attivo.','Active item selected.'],['Test riuscito:','Test successful:'],['Test fallito','Test failed'],['Modello aggiornato.','Model updated.'],['Provider aggiornato.','Provider updated.'],['Chiave rimossa.','Key removed.'],
- ['Router avviato','Router started'],['Nuova richiesta','New request'],['Tentativo #','Attempt #'],['Modello fallito','Model failed'],['Risposta valida in','Valid response in'],
- ['Servizio non installato','Service not installed'],['Servizio installato','Service installed'],['abilitato','enabled'],['disabilitato','disabled'],['attivo','active'],['inattivo','inactive'],['linger attivo','linger enabled'],['linger disattivo','linger disabled'],
- ['Servizio installato e abilitato per i prossimi avvii.','Service installed and enabled for future starts.'],['Servizio rimosso.','Service removed.'],['Avvio al boot abilitato.','Boot startup enabled.'],['Avvio al boot disabilitato.','Boot startup disabled.'],
- ['Imposta come ','Set '],[" l'indirizzo indicato qui sotto.",' to the address shown below.'],[' come modello per seguire il modello attivo e il failover configurato.',' as the model to follow the active item and configured failover.'],
- ['Se crei una chiave, tutte le chiamate OpenAI-compatible al router richiederanno ','If you create a key, all OpenAI-compatible calls to the router require '],[". Se la rimuovi, l'autenticazione viene disattivata.",'. Removing it disables authentication.'],
- ['Inserisci la ','Enter the '],['chiave API','API key'],[' del router nel client.',' in the client.'],[' non è richiesta',' is not required'],['; lascia il campo vuoto se il client lo permette.','; leave the field empty if the client allows it.'],
- ['abilitati','enabled'],['Nessun preset configurato.','No presets configured.'],['modelli raggiungibili.','models reachable.'],
- ['il client ha chiesto','the client requested'],['in parallelo','in parallel'],['in attesa della risposta','waiting for response'],['in attesa del primo token','waiting for first token'],['streaming in corso','streaming in progress'],
- ['systemd non disponibile','systemd unavailable'],['Questa funzione richiede Linux con systemd user services.','This feature requires Linux with systemd user services.'],
- ['Rigenerare la chiave? La chiave attuale smetterà immediatamente di funzionare.','Regenerate the key? The current key will stop working immediately.'],['Rimuovere la chiave API? Il router tornerà accessibile senza autenticazione.','Remove the API key? The router will become accessible without authentication.'],
- ['Eliminare provider e tutti i suoi modelli?','Delete the provider and all its models?'],['Eliminare il preset? I modelli che contiene restano nella lista.','Delete the preset? Its models remain in the global list.'],['Rimuovere la chiave salvata per questo provider?','Remove the saved key for this provider?'],
- ['Il modello attivo ora vince sulla richiesta del client.','The active item now overrides the client request.'],['Il client può di nuovo scegliere il modello.','The client can choose the model again.'],
- ['Test…','Testing…'],['caricamento…','loading…'],['verifica…','checking…'],['verifica fallita','check failed'],['login attivo','login active'],['scade fra','expires in'],['problema:','issue:'],
- ["Richiede 'codex login'. Endpoint interno non documentato: usalo solo con il tuo account.","Requires 'codex login'. Undocumented internal endpoint: use it only with your own account."],
- ['Usa una Gemini API key creata in Google AI Studio. Endpoint OpenAI-compatible ufficiale di Google.','Use a Gemini API key created in Google AI Studio. Official Google OpenAI-compatible endpoint.'],
- ['Se attivo, il modello scelto qui vince anche se l’agente ne chiede un altro.','When enabled, the selected model wins even if the agent requests another one.'],
- ["Se attivo, il modello scelto qui vince anche se l'agente ne chiede un altro.","When enabled, the selected model wins even if the agent requests another one."],
- ['Sezioni router','Router sections'],['Usa ','Use '],['modelli','models']
-];
-function enText(v){let s=String(v??'');for(const [a,b] of EN_REPL)s=s.split(a).join(b);return s}
-function translateRaw(raw){if(lang==='it')return raw;return enText(raw)}
-function localize(root=document.body){
- document.documentElement.lang=lang;
- const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
- let n;while(n=walker.nextNode()){
-  const p=n.parentElement;if(!p||p.closest('script,style,pre,code'))continue;
-  if(!originals.has(n))originals.set(n,n.nodeValue);
-  n.nodeValue=lang==='it'?originals.get(n):translateRaw(originals.get(n));
- }
- root.querySelectorAll?.('[title],[placeholder],[aria-label]').forEach(el=>{
-  let bag=attrOriginals.get(el)||{};
-  for(const a of ['title','placeholder','aria-label'])if(el.hasAttribute(a)){
-   const cur=el.getAttribute(a)||'',old=bag[a],oldEn=old?enText(old):null;
-   if(!old||(cur!==old&&cur!==oldEn))bag[a]=cur;
-   el.setAttribute(a,lang==='it'?bag[a]:enText(bag[a]));
-  }
-  attrOriginals.set(el,bag);
- });
- const b=$('#langBtn');if(b){b.textContent=lang==='it'?'EN':'IT';b.title=lang==='it'?"Passa all'inglese":'Switch to Italian'}
-}
-function setLanguage(next){lang=next==='en'?'en':'it';localStorage.setItem(LANG_KEY,lang);localize()}
-function ask(msg){return window['confirm'](lang==='en'?enText(msg):msg)}
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
-function flash(msg,ok=true){const e=$('#flash');e.textContent=lang==='en'?enText(msg):msg;e.className='flash '+(ok?'ok':'bad');const shown=e.textContent;setTimeout(()=>{if(e.textContent===shown)e.textContent=''},5000)}
-async function api(url,opt={}){const r=await fetch(url,{headers:{'Content-Type':'application/json'},...opt});let d;try{d=await r.json()}catch{d={detail:await r.text()}}if(!r.ok)throw new Error(d.detail||d.error?.message||d.error||JSON.stringify(d));return d}
-function providerOf(id){return state.providers.find(p=>p.id===id)}
-function switchTab(id){document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.id===id));document.querySelectorAll('.tab-btn').forEach(b=>{const on=b.dataset.tab===id;b.classList.toggle('active',on);b.setAttribute('aria-selected',on?'true':'false')});localStorage.setItem('gisell-tab',id)}
-function duration(sec){sec=Math.max(0,Math.floor(sec||0));if(sec<60)return sec+' s';const m=Math.floor(sec/60);if(m<60)return m+' min';const h=Math.floor(m/60);if(h<24)return h+' h '+(m%60)+' min';const d=Math.floor(h/24);return d+' g '+(h%24)+' h'}
-function healthTag(route){const h=state.health[route.id]||{};if(h.status==='ok')return `<span class="tag ok">OK${h.latency_ms?' · '+h.latency_ms+' ms':''}</span>`;if(h.status==='error')return '<span class="tag bad" title="'+esc(h.last_error||'')+'">ERRORE</span>';return '<span class="tag">NON TESTATO</span>'}
-function render(){
- $('#apiUrl').textContent=state.local_api;
- const pe=$('#providers'); pe.innerHTML='';
- if(!state.providers.length) pe.innerHTML='<div class="empty">Nessun provider. Aggiungine uno e poi inserisci uno o più modelli.</div>';
- state.providers.forEach(p=>{
-   const rs=state.routes.filter(r=>r.provider_id===p.id);
-   const c=document.createElement('div'); c.className='card';
-   c.innerHTML=`<div class="provider-head"><div><div class="provider-name">${esc(p.name)} ${p.enabled?'':'<span class="tag off">DISABILITATO</span>'}</div><div class="muted">${esc(p.base_url)} · ${p.auth_mode==='codex_oauth'?'login OAuth Codex':(p.has_api_key?'chiave salvata':'nessuna chiave')}</div>${p.auth_mode==='codex_oauth'?`<div class="stat" data-codex="${p.id}">login non verificato</div>`:''}</div><div class="row"><button class="small" data-action="add-model" data-id="${p.id}">+ Modello</button><button class="small" data-action="edit-provider" data-id="${p.id}">Modifica</button>${p.auth_mode==='codex_oauth'?`<button class="small" data-action="codex-check" data-id="${p.id}">Verifica login</button>`:''}<button class="small" data-action="toggle-provider" data-id="${p.id}">${p.enabled?'Disabilita':'Abilita'}</button><button class="small danger" data-action="delete-provider" data-id="${p.id}">Elimina</button></div></div><div class="models">${rs.length?rs.map(r=>`<div class="model"><div><b>${esc(r.label)}</b><div class="muted">${esc(r.model)}</div><code class="mid">id API: ${esc(r.exposed_id)}</code><div class="stat" data-stat="${r.id}">${statLine(r.id)}</div></div><div class="row">${healthTag(r)} ${r.enabled?'':'<span class="tag off">OFF</span>'}<button class="small" data-action="edit-route" data-id="${r.id}">Modifica</button><button class="small" data-action="toggle-route" data-id="${r.id}">${r.enabled?'Disabilita':'Abilita'}</button><button class="small" data-action="test" data-id="${r.id}">Test</button><button class="small danger" data-action="delete-route" data-id="${r.id}">×</button></div></div>`).join(''):'<div class="muted">Nessun modello configurato.</div>'}</div>`;
-   pe.appendChild(c);
- });
- const re=$('#routes');
- if(!state.routes.length){re.innerHTML='<div class="empty">Aggiungi almeno un modello.</div>'} else re.innerHTML=state.routes.map((r,i)=>{
-   const nav=`<button class="small" data-action="up" data-id="${r.id}" ${i===0?'disabled':''}>↑</button><button class="small" data-action="down" data-id="${r.id}" ${i===state.routes.length-1?'disabled':''}>↓</button>`;
-   if(r.kind==='preset'){
-     const chips=(r.members||[]).map(m=>{const x=state.routes.find(z=>z.id===m);return x?`<span class="chip${x.enabled?'':' off'}">${esc(x.label)}</span>`:''}).join('')||'<span class="muted">nessun membro</span>';
-     return `<div class="route preset-row"><div class="prio">${i+1}</div><div><b>${esc(r.label)}</b> <span class="tag">PRESET</span> <span class="tag active" data-live-active="${r.id}" hidden>ATTIVO</span>${r.enabled?'':' <span class="tag off">OFF</span>'}<div class="muted">${r.member_count||0} modelli utilizzabili · id API: <code class="mid">${esc(r.exposed_id)}</code></div><div class="preset-members">${chips}</div></div><div class="route-actions">${nav}<button class="small" data-action="activate" data-id="${r.id}" ${!r.enabled||!r.member_count?'disabled':''}>Usa ora</button></div></div>`;
-   }
-   const p=providerOf(r.provider_id);
-   return `<div class="route"><div class="prio">${i+1}</div><div><b>${esc(p?.name||'?')} / ${esc(r.label)}</b><div class="muted">${esc(r.model)} <span class="tag active" data-live-active="${r.id}" hidden>ATTIVO</span> ${healthTag(r)}</div></div><div class="route-actions">${nav}<button class="small" data-action="activate" data-id="${r.id}" ${!r.enabled||!p?.enabled?'disabled':''}>Usa ora</button></div></div>`}).join('');
- renderPresets();
- renderApiTab();
- renderLive();
- localize();
-}
-function renderApiTab(){
- const enabled=!!state.router_api_key_enabled;
- const status=$('#routerKeyStatus');
- status.textContent=enabled?'Chiave attiva: autenticazione richiesta':'Nessuna chiave: accesso libero';
- status.className=enabled?'auth-on':'auth-off';
- $('#deleteRouterKey').disabled=!enabled;
- $('#createRouterKey').textContent=enabled?'Rigenera chiave':'Crea chiave';
- $('#apiBaseUrl').textContent=state.local_api;
- $('#authInstruction').innerHTML=enabled?'Inserisci la <b>chiave API</b> del router nel client.':'La <b>chiave API non è richiesta</b>; lascia il campo vuoto se il client lo permette.';
- const auth=enabled?'  -H "Authorization: Bearer LA_TUA_CHIAVE" \\n':'';
- $('#curlExample').textContent=`curl ${state.local_api}/chat/completions \\n  -H "Content-Type: application/json" \\n${auth}  -d '{"model":"router","messages":[{"role":"user","content":"Ciao"}]}'`;
- const pyKey=enabled?'LA_TUA_CHIAVE':'non-richiesta';
- $('#pythonExample').textContent=`from openai import OpenAI
-
-client = OpenAI(
-    base_url="${state.local_api}",
-    api_key="${pyKey}",
-)
-
-response = client.chat.completions.create(
-    model="router",
-    messages=[{"role": "user", "content": "Ciao"}],
-)
-
-print(response.choices[0].message.content)`;
-}
-
-let logCursor=0;
-function logTime(ts){try{return new Date((ts||0)*1000).toLocaleTimeString('it-IT',{hour12:false})}catch{return'--:--:--'}}
-function appendLogRows(rows){
- const w=$('#logWindow'),empty=$('#logEmpty');
- if(!w||!rows?.length)return;
- if(empty)empty.remove();
- const stick=$('#logAutoScroll')?.checked && (w.scrollHeight-w.scrollTop-w.clientHeight<80);
- for(const x of rows){
-  const source=[x.provider,x.label||x.model].filter(Boolean).join(' / ') || (x.request_id||x.kind||'router');
-  const row=document.createElement('div');row.className='log-row';
-  row.innerHTML=`<div class="log-time">${esc(logTime(x.at))}</div><div class="log-level ${esc(x.level||'info')}">${esc(x.level||'info')}</div><div class="log-source" title="${esc(source)}">${esc(source)}</div><div class="log-message">${esc(x.message||'')}${x.detail?`<span class="log-detail">${esc(x.detail)}</span>`:''}</div>`;
-  w.appendChild(row);localize(row);
- }
- if(stick)w.scrollTop=w.scrollHeight;
-}
-async function pollLogs(){
- try{
-  const d=await api('/api/logs?after='+logCursor);
-  if(d.logs?.length)appendLogRows(d.logs);
-  logCursor=Math.max(logCursor,d.last_id||0);
-  const c=$('#logCount');if(c){c.textContent=(d.count||0)+' righe';localize(c)}
- }catch{}
-}
-async function clearLogs(){
- const d=await api('/api/logs',{method:'DELETE'});
- logCursor=d.last_id||logCursor;
- const w=$('#logWindow');w.innerHTML='<div class="log-empty" id="logEmpty">Nessun evento registrato.</div>';
- $('#logCount').textContent='0 righe';localize($('#logsTab'));
-}
-
-let live=null;
-function ago(ts){if(!ts)return'';const d=Math.max(0,Date.now()/1000-ts);if(d<1)return lang==='en'?'now':'ora';if(d<60)return Math.round(d)+(lang==='en'?' s ago':' s fa');if(d<3600)return Math.round(d/60)+(lang==='en'?' min ago':' min fa');return Math.round(d/3600)+(lang==='en'?' h ago':' h fa')}
-function statLine(rid){const st=live&&live.stats&&live.stats[rid];if(!st||!st.requests)return'nessuna richiesta';const parts=[st.requests+' richieste'];if(st.fail)parts.push(st.fail+' fallite');if(st.avg_latency_ms)parts.push('media '+st.avg_latency_ms+' ms');if(st.last_used)parts.push('ultimo uso '+ago(st.last_used));return parts.join(' · ')}
-function updateUsageIndicators(){
- const activeIds=new Set((live?.in_flight||[]).map(x=>x.active_item_id).filter(Boolean));
- if(!activeIds.size){
-  const idleId=live?.active_route_id||state?.active_route_id;
-  if(idleId)activeIds.add(idleId);
- }
- document.querySelectorAll('[data-live-active]').forEach(el=>{
-  el.hidden=!activeIds.has(el.dataset.liveActive);
- });
-}
-function renderLive(){
- if(!live)return;
- const bar=$('#live'),dot=$('#liveDot'),m=$('#liveModel'),sub=$('#liveSub');
- $('#overrideChk').checked=!!live.override_client_model;
- updateUsageIndicators();
- const f=live.in_flight;
- if(f.length){
-  const c=f[0];
-  bar.classList.add('busy');dot.className='dot busy';
-  m.textContent=(c.label||c.model||'?')+(f.length>1?`  (+${f.length-1} in parallelo)`:'');
-  const asked=c.client_model?`il client ha chiesto "${c.client_model}"`:'nessun modello richiesto';
-  sub.textContent=`${c.provider||'?'} · ${c.model} · ${c.stream?'streaming':'risposta singola'} · ${c.phase} · ${(c.elapsed_ms/1000).toFixed(1)} s · ${asked}`;
- } else if(live.last_used){
-  const l=live.last_used;
-  bar.classList.remove('busy');dot.className='dot idle';
-  m.textContent=l.label||l.model;
-  sub.textContent=`inattivo · ultima risposta da ${l.provider} (${l.model}) ${ago(l.at)}${l.latency_ms?' · '+l.latency_ms+' ms':''}`;
- } else {
-  bar.classList.remove('busy');dot.className='dot idle';
-  m.textContent='In attesa di richieste…';
-  const act=state&&state.routes.find(r=>r.id===live.active_route_id);
-  sub.textContent=act?`pronto · la prossima richiesta partira\u2019 da ${act.label}`:'Nessuna richiesta ancora ricevuta.';
- }
- document.querySelectorAll('[data-stat]').forEach(e=>{e.textContent=statLine(e.dataset.stat)});
- const active=state&&state.routes.find(r=>r.id===live.active_route_id);
- const activeProvider=active&&providerOf(active.provider_id);
- const modelRoutes=state?state.routes.filter(r=>r.kind!=='preset'):[];
- const presetRoutes=state?state.routes.filter(r=>r.kind==='preset'):[];
- const enabledRoutes=modelRoutes.filter(r=>r.enabled&&providerOf(r.provider_id)?.enabled);
- const enabledProviders=state?state.providers.filter(p=>p.enabled):[];
- const statValues=Object.values(live.stats||{});
- const reqs=statValues.reduce((n,s)=>n+(s.requests||0),0);
- const fails=statValues.reduce((n,s)=>n+(s.fail||0),0);
- $('#statusRouter').textContent=f.length?'BUSY':'ONLINE';
- $('#statusRouter').className='status-value '+(f.length?'warn':'ok');
- $('#statusUptime').textContent='uptime '+duration((live.now||Date.now()/1000)-(live.started_at||live.now));
- $('#statusActive').textContent=active?.label||'—';
- $('#statusActiveProvider').textContent=active?(active.kind==='preset'?`preset · ${active.member_count||0} modelli`:(activeProvider?.name||'?')+' · '+active.model):'nessun modello attivo';
- $('#statusModels').textContent=enabledRoutes.length+' / '+modelRoutes.length;
- $('#statusModelsDetail').textContent=(presetRoutes.length?presetRoutes.length+' preset · ':'')+enabledProviders.length+'/'+(state?.providers.length||0)+' provider';
- $('#statusRequests').textContent=reqs;
- $('#statusErrors').textContent=fails+' errori · '+f.length+' in corso';
- localize($('#modelsTab'));
-}
-async function pollLive(){try{live=await api('/api/live');if(state&&live.active_route_id!==state.active_route_id){state.active_route_id=live.active_route_id;render()}renderLive()}catch{}}
-function startPolling(){setInterval(()=>{if(!document.hidden){pollLive();pollLogs()}},1200);document.addEventListener('visibilitychange',()=>{if(!document.hidden){pollLive();pollLogs()}})}
-async function refresh(){state=await api('/api/state');render();await Promise.all([pollLive(),pollLogs()])}
-function fillPresets(){const s=$('#preset');s.innerHTML=Object.entries(state.presets).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');applyPreset()}
-function applyPreset(){const k=$('#preset').value,v=state.presets[k];if(!v)return;$('#providerName').value=v.label;$('#baseUrl').value=v.base_url;
- const oauth=v.auth_mode==='codex_oauth';
- $('#apiKeyField').hidden=oauth; $('#authPathField').hidden=!oauth;
- $('#presetNote').textContent=v.note||''; $('#presetNote').hidden=!v.note;localize($('#providerDialog'))}
-$('#langBtn').addEventListener('click',()=>setLanguage(lang==='it'?'en':'it'));
-document.querySelectorAll('.tab-btn').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
-const savedTab=localStorage.getItem('gisell-tab');if(savedTab&&document.getElementById(savedTab))switchTab(savedTab);
-$('#addProviderBtn').addEventListener('click',()=>{fillPresets();$('#apiKey').value='';$('#providerDialog').showModal()});
-$('#preset').addEventListener('change',applyPreset);
-document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$('#'+b.dataset.close).close()));
-$('#saveProvider').addEventListener('click',async()=>{try{state=await api('/api/providers',{method:'POST',body:JSON.stringify({preset:$('#preset').value,name:$('#providerName').value,base_url:$('#baseUrl').value,api_key:$('#apiKey').value,auth_path:$('#authPath').value})});$('#providerDialog').close();render();flash('Provider salvato.')}catch(e){flash(e.message,false)}});
-$('#saveModel').addEventListener('click',async()=>{try{state=await api(`/api/providers/${$('#modelProviderId').value}/models`,{method:'POST',body:JSON.stringify({model:$('#modelId').value,label:$('#modelLabel').value})});$('#modelDialog').close();render();flash('Modello aggiunto.')}catch(e){flash(e.message,false)}});
-function routeName(id){const r=state.routes.find(x=>x.id===id);if(!r)return id;if(r.kind==='preset')return r.label+' (preset)';const p=providerOf(r.provider_id);return (p?.name?p.name+' / ':'')+r.label}
-function presetOf(id){return state.routes.find(r=>r.id===id&&r.kind==='preset')}
-async function savePresetMembers(id,members){return await api('/api/presets/'+id,{method:'PATCH',body:JSON.stringify({members})})}
-function renderPresets(){
- const box=$('#presets');box.innerHTML='';
- const presets=state.routes.filter(r=>r.kind==='preset');
- if(!presets.length){box.innerHTML='<div class="empty">Nessun preset configurato.</div>';return}
- presets.forEach(g=>{
-  const members=(g.members||[]).map(m=>state.routes.find(x=>x.id===m)).filter(Boolean);
-  const rows=members.length?members.map((m,i)=>{
-   const p=providerOf(m.provider_id);
-   const sub=m.kind==='preset'?`preset · ${m.member_count||0} modelli`:`${esc(p?.name||'?')} · ${esc(m.model)}`;
-   return `<div class="model"><div><b>${esc(m.label)}</b>${m.enabled?'':' <span class="tag off">OFF</span>'}<div class="muted">${sub}</div></div><div class="config-model-actions"><span class="muted">${i+1}</span><button class="small" data-action="pm-up" data-id="${g.id}" data-mid="${m.id}" ${i===0?'disabled':''}>↑</button><button class="small" data-action="pm-down" data-id="${g.id}" data-mid="${m.id}" ${i===members.length-1?'disabled':''}>↓</button><button class="small danger" data-action="pm-del" data-id="${g.id}" data-mid="${m.id}">×</button></div></div>`
-  }).join(''):'<div class="muted">Nessun modello nel preset: verrà saltato dal failover e non compare in /v1/models.</div>';
-  const c=document.createElement('div');c.className='card';
-  c.innerHTML=`<div class="provider-head"><div><div class="provider-name">${esc(g.label)} ${g.enabled?'':'<span class="tag off">DISABILITATO</span>'}</div><div class="muted">${g.member_count||0} modelli utilizzabili · id API: <code class="mid">${esc(g.exposed_id)}</code></div></div><div class="row"><button class="small" data-action="preset-add" data-id="${g.id}">+ Modello</button><button class="small" data-action="preset-rename" data-id="${g.id}">Rinomina</button><button class="small" data-action="toggle-route" data-id="${g.id}">${g.enabled?'Disabilita':'Abilita'}</button><button class="small danger" data-action="delete-route" data-id="${g.id}">Elimina</button></div></div><div class="models">${rows}</div>`;
-  box.appendChild(c);
- });
-}
-function renderMemberPicker(){
- const g=presetOf($('#memberPresetId').value);if(!g)return;
- const avail=state.routes.filter(r=>r.id!==g.id&&!(g.members||[]).includes(r.id));
- $('#memberPicker').innerHTML=avail.length?avail.map(r=>`<div class="prow"><span class="pname" title="${esc(routeName(r.id))}">${esc(routeName(r.id))}</span>${r.enabled?'':'<span class="tag off">OFF</span>'}<button class="small" data-action="pm-add" data-id="${g.id}" data-mid="${r.id}">+</button></div>`).join(''):'<div class="empty">Tutti i modelli sono già nel preset.</div>';localize($('#memberDialog'));
-}
-let service=null;
-function renderService(){
- const box=$('#serviceState'),detail=$('#serviceDetail'),install=$('#installServiceBtn'),remove=$('#removeServiceBtn'),linger=$('#lingerBtn');
- if(!service){box.textContent='Verifica servizio…';return}
- if(!service.linux||!service.systemd){box.textContent='systemd non disponibile';detail.textContent='Questa funzione richiede Linux con systemd user services.';install.disabled=true;remove.disabled=true;linger.disabled=true;localize($('#configTab'));return}
- box.textContent=service.installed?'Servizio installato':'Servizio non installato';
- detail.textContent=`${service.enabled?'abilitato':'disabilitato'} · ${service.active?'attivo':'inattivo'} · ${service.linger?'linger attivo':'linger disattivo'} · ${service.unit_path}`;
- install.disabled=service.installed&&service.enabled;remove.disabled=!service.installed;linger.disabled=!service.installed;linger.textContent=service.linger?'Disabilita avvio al boot':'Abilita avvio al boot';localize($('#configTab'));
-}
-async function refreshService(){try{service=await api('/api/service');renderService()}catch(e){service=null;$('#serviceState').textContent=e.message;localize($('#configTab'))}}
-$('#installServiceBtn').addEventListener('click',async()=>{try{service=await api('/api/service',{method:'POST'});renderService();flash('Servizio installato e abilitato per i prossimi avvii.')}catch(e){flash(e.message,false)}});
-$('#removeServiceBtn').addEventListener('click',async()=>{if(!ask(lang==='en'?'Remove the systemd service?':'Rimuovere il servizio systemd?'))return;try{service=await api('/api/service',{method:'DELETE'});renderService();flash('Servizio rimosso.')}catch(e){flash(e.message,false)}});
-$('#lingerBtn').addEventListener('click',async()=>{try{service=await api('/api/service/linger',{method:service?.linger?'DELETE':'POST'});renderService();flash(service.linger?'Avvio al boot abilitato.':'Avvio al boot disabilitato.')}catch(e){flash(e.message,false)}});
-$('#addPresetBtn').addEventListener('click',()=>{$('#presetTitle').textContent='Nuovo preset';$('#presetId').value='';$('#presetLabel').value='';$('#presetDialog').showModal()});
-$('#savePreset').addEventListener('click',async()=>{
- const label=$('#presetLabel').value.trim();
- if(!label){flash('Dai un nome al preset.',false);return}
- const id=$('#presetId').value;
- try{
-  state=id?await api('/api/presets/'+id,{method:'PATCH',body:JSON.stringify({label})})
-          :await api('/api/presets',{method:'POST',body:JSON.stringify({label,members:[]})});
-  $('#presetDialog').close();render();flash(id?'Preset rinominato.':'Preset creato: aggiungi i modelli con "+ Modello".');
- }catch(e){flash(e.message,false)}
-});
-$('#testAllBtn').addEventListener('click',async e=>{const b=e.currentTarget;b.disabled=true;b.textContent='Test…';try{const d=await api('/api/routes/test-all',{method:'POST'});state=d.state;render();const ok=Object.values(d.results).filter(x=>x.ok).length;flash(`${ok}/${Object.keys(d.results).length} modelli raggiungibili.`,ok>0)}catch(err){flash(err.message,false)}finally{b.disabled=false;b.textContent='Testa tutti'}});
-$('#discoverModels').addEventListener('click',async()=>{const id=$('#modelProviderId').value;$('#discoverStatus').textContent='caricamento…';$('#discoverList').hidden=true;try{const d=await api(`/api/providers/${id}/discover-models`,{method:'POST'});$('#discoverStatus').textContent=d.models.length+' modelli';const list=$('#discoverList');list.innerHTML=d.models.map(m=>`<button type="button" data-model="${esc(m)}">${esc(m)}</button>`).join('');list.hidden=false}catch(e){$('#discoverStatus').textContent='';flash(e.message,false)}});
-$('#discoverList').addEventListener('click',e=>{const b=e.target.closest('[data-model]');if(b){$('#modelId').value=b.dataset.model;$('#modelLabel').value=b.dataset.model;$('#discoverList').hidden=true}});
-$('#copyApi').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(state.local_api);flash('Indirizzo API copiato.')}catch{flash('Copia manualmente: '+state.local_api,false)}});
-$('#copyApiBase').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(state.local_api);flash('Base URL copiata.')}catch{flash('Copia manualmente: '+state.local_api,false)}});
-$('#createRouterKey').addEventListener('click',async()=>{
- if(state.router_api_key_enabled&&!ask('Rigenerare la chiave? La chiave attuale smettera\' immediatamente di funzionare.'))return;
- try{const d=await api('/api/router-key',{method:'POST'});state.router_api_key_enabled=true;$('#newRouterKey').textContent=d.key;$('#newKeyArea').hidden=false;renderApiTab();flash('Nuova chiave API creata.')}catch(e){flash(e.message,false)}
-});
-$('#deleteRouterKey').addEventListener('click',async()=>{
- if(!ask('Rimuovere la chiave API? Il router tornera\' accessibile senza autenticazione.'))return;
- try{await api('/api/router-key',{method:'DELETE'});state.router_api_key_enabled=false;$('#newKeyArea').hidden=true;$('#newRouterKey').textContent='';renderApiTab();flash('Chiave API rimossa: autenticazione disattivata.')}catch(e){flash(e.message,false)}
-});
-$('#copyRouterKey').addEventListener('click',async()=>{const k=$('#newRouterKey').textContent;try{await navigator.clipboard.writeText(k);flash('Chiave copiata.')}catch{flash('Copia manualmente la chiave.',false)}});
-$('#clearLogsBtn').addEventListener('click',async()=>{try{await clearLogs();flash('Log della sessione cancellato.')}catch(e){flash(e.message,false)}});
-document.body.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b)return;const a=b.dataset.action,id=b.dataset.id;try{
- if(a==='add-model'){const p=providerOf(id);$('#modelProviderId').value=id;$('#modelTitle').textContent='Aggiungi modello a '+p.name;$('#modelId').value='';$('#modelLabel').value='';$('#discoverList').hidden=true;$('#discoverStatus').textContent='';$('#modelDialog').showModal();return}
- if(a==='preset-rename'){const g=presetOf(id);$('#presetTitle').textContent='Rinomina preset';$('#presetId').value=id;$('#presetLabel').value=g.label;$('#presetDialog').showModal();return}
- if(a==='preset-add'){$('#memberPresetId').value=id;renderMemberPicker();$('#memberDialog').showModal();return}
- if(a==='pm-add'||a==='pm-del'||a==='pm-up'||a==='pm-down'){
-  const g=presetOf(id),mid=b.dataset.mid,m=[...(g.members||[])],i=m.indexOf(mid);
-  if(a==='pm-add'&&i<0)m.push(mid);
-  if(a==='pm-del'&&i>=0)m.splice(i,1);
-  if(a==='pm-up'&&i>0)m[i-1]=m.splice(i,1,m[i-1])[0];
-  if(a==='pm-down'&&i>=0&&i<m.length-1)m[i+1]=m.splice(i,1,m[i+1])[0];
-  state=await savePresetMembers(id,m);render();
-  if(a==='pm-add')renderMemberPicker();
-  return;
- }
- if(a==='edit-route'){const r=state.routes.find(x=>x.id===id);$('#editRouteId').value=id;$('#editRouteModel').value=r.model;$('#editRouteLabel').value=r.label;$('#editRouteProvider').innerHTML=state.providers.map(p=>`<option value="${p.id}"${p.id===r.provider_id?' selected':''}>${esc(p.name)}</option>`).join('');$('#editModelDialog').showModal();return}
- if(a==='edit-provider'){const p=providerOf(id);$('#editProviderId').value=id;$('#editProviderName').value=p.name;$('#editProviderUrl').value=p.base_url;$('#editProviderKey').value='';$('#editProviderKey').placeholder=p.has_api_key?'chiave salvata — lascia vuoto per non modificare':'nessuna chiave salvata';$('#editProviderDialog').showModal();return}
- if(a==='codex-check'){const el=document.querySelector(`[data-codex="${id}"]`);if(el)el.textContent='verifica…';try{const d=await api(`/api/providers/${id}/codex-status`);if(el)el.textContent=d.ok?`login attivo · account ${d.account_id||'?'} · scade fra ${Math.max(0,Math.round((d.expires_in_s||0)/60))} min`:('problema: '+d.error);flash(d.ok?'Login Codex valido.':d.error,d.ok)}catch(err){if(el)el.textContent='verifica fallita';flash(err.message,false)}return}
- if(a==='delete-provider'){if(!ask('Eliminare provider e tutti i suoi modelli?'))return;state=await api('/api/providers/'+id,{method:'DELETE'})}
- if(a==='toggle-provider'){const p=providerOf(id);state=await api('/api/providers/'+id,{method:'PATCH',body:JSON.stringify({enabled:!p.enabled})})}
- if(a==='delete-route'){const r=state.routes.find(x=>x.id===id);if(r?.kind==='preset'&&!ask('Eliminare il preset? I modelli che contiene restano nella lista.'))return;state=await api('/api/routes/'+id,{method:'DELETE'})}
- if(a==='toggle-route'){const r=state.routes.find(x=>x.id===id);const url=(r.kind==='preset'?'/api/presets/':'/api/routes/')+id;state=await api(url,{method:'PATCH',body:JSON.stringify({enabled:!r.enabled})})}
- if(a==='up'||a==='down'){state=await api(`/api/routes/${id}/move`,{method:'POST',body:JSON.stringify({direction:a==='up'?-1:1})})}
- if(a==='activate'){state=await api(`/api/routes/${id}/activate`,{method:'POST'});flash('Modello impostato come attivo.')}
- if(a==='test'){b.disabled=true;b.textContent='Test…';const d=await api(`/api/routes/${id}/test`,{method:'POST'});state=d.state;if(d.ok)flash('Test riuscito: '+d.latency_ms+' ms');else flash(d.error||'Test fallito',false)}
- render();
- }catch(err){flash(err.message,false)}finally{if(a==='test'){b.disabled=false;b.textContent='Test'}}});
-$('#overrideChk').addEventListener('change',async e=>{try{state=await api('/api/settings',{method:'PATCH',body:JSON.stringify({override_client_model:e.target.checked})});flash(e.target.checked?'Il modello attivo ora vince sulla richiesta del client.':'Il client puo\u2019 di nuovo scegliere il modello.')}catch(err){flash(err.message,false);e.target.checked=!e.target.checked}});
-$('#saveEditModel').addEventListener('click',async()=>{try{state=await api('/api/routes/'+$('#editRouteId').value,{method:'PATCH',body:JSON.stringify({model:$('#editRouteModel').value,label:$('#editRouteLabel').value,provider_id:$('#editRouteProvider').value})});$('#editModelDialog').close();render();flash('Modello aggiornato.')}catch(e){flash(e.message,false)}});
-$('#saveEditProvider').addEventListener('click',async()=>{try{const b={name:$('#editProviderName').value,base_url:$('#editProviderUrl').value};const k=$('#editProviderKey').value;if(k)b.api_key=k;state=await api('/api/providers/'+$('#editProviderId').value,{method:'PATCH',body:JSON.stringify(b)});$('#editProviderDialog').close();render();flash('Provider aggiornato.')}catch(e){flash(e.message,false)}});
-$('#clearProviderKey').addEventListener('click',async()=>{if(!ask('Rimuovere la chiave salvata per questo provider?'))return;try{state=await api('/api/providers/'+$('#editProviderId').value,{method:'PATCH',body:JSON.stringify({api_key:''})});$('#editProviderDialog').close();render();flash('Chiave rimossa.')}catch(e){flash(e.message,false)}});
-localize();refresh().then(()=>{startPolling();refreshService()}).catch(e=>flash(e.message,false));
-</script></main></body></html>'''
 
 
 @app.get("/", response_class=HTMLResponse)
