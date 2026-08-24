@@ -1,18 +1,20 @@
 name: Publish approved separated build
 
 on:
-  issues:
-    types: [opened]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   publish:
-    if: github.event.issue.title == 'GISELL_RELEASE_TRIGGER_914aaacf'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Reconstruct approved ZIP
         shell: bash
@@ -55,4 +57,4 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git commit -m 'Publish fully separated i18n architecture'
-          git push
+          git push origin HEAD:main
