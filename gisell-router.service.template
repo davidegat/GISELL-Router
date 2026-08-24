@@ -1,0 +1,14 @@
+[Unit]
+Description=__APP_NAME__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__PYTHON__ __SCRIPT__
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

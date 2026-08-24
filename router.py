@@ -47,11 +47,9 @@ class FastJSONResponse(Response):
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 SECRETS_PATH = APP_DIR / "secrets.json"
-APP_NAME = "GISELL Router"
 APP_VERSION = "0.3.0"
-APP_AUTHOR = "Davide (gat)"
-APP_LICENSE = "CC BY-NC 4.0"
 SERVICE_NAME = "gisell-router.service"
+SERVICE_TEMPLATE_PATH = APP_DIR / "gisell-router.service.template"
 
 LANG_IT_PATH = APP_DIR / "lang_it.json"
 LANG_EN_PATH = APP_DIR / "lang_en.json"
@@ -61,9 +59,9 @@ def _load_language_pack(path: Path) -> dict[str, str]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Cannot read language file {path.name}: {exc}") from exc
+        raise RuntimeError(path.name) from exc
     if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
-        raise RuntimeError(f"Invalid language file: {path.name}")
+        raise RuntimeError(path.name)
     return data
 
 
@@ -71,6 +69,15 @@ LANGUAGE_PACKS = {
     "it": _load_language_pack(LANG_IT_PATH),
     "en": _load_language_pack(LANG_EN_PATH),
 }
+
+
+def static_text(key: str, language: str = "en") -> str:
+    return LANGUAGE_PACKS[language][key]
+
+
+APP_NAME = static_text("meta.app_name")
+APP_AUTHOR = static_text("meta.author")
+APP_LICENSE = static_text("meta.license")
 _REQUEST_LANGUAGE: ContextVar[str] = ContextVar("gisell_request_language", default="it")
 
 
@@ -114,68 +121,57 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 PRESETS: dict[str, dict[str, Any]] = {
     "openrouter": {
-        "label": "OpenRouter",
         "label_key": "provider.template.openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "needs_key": True,
     },
     "groq": {
-        "label": "Groq",
         "label_key": "provider.template.groq",
         "base_url": "https://api.groq.com/openai/v1",
         "needs_key": True,
     },
     "openai": {
-        "label": "OpenAI",
         "label_key": "provider.template.openai",
         "base_url": "https://api.openai.com/v1",
         "needs_key": True,
     },
     "google_ai_studio": {
-        "label": "Google AI Studio",
         "label_key": "provider.template.google",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "needs_key": True,
         "note_key": "provider.google_note",
     },
     "mistral": {
-        "label": "Mistral",
         "label_key": "provider.template.mistral",
         "base_url": "https://api.mistral.ai/v1",
         "needs_key": True,
     },
     "together": {
-        "label": "Together",
         "label_key": "provider.template.together",
         "base_url": "https://api.together.ai/v1",
         "needs_key": True,
     },
     "deepinfra": {
-        "label": "DeepInfra",
         "label_key": "provider.template.deepinfra",
         "base_url": "https://api.deepinfra.com/v1/openai",
         "needs_key": True,
     },
     "fireworks": {
-        "label": "Fireworks AI",
         "label_key": "provider.template.fireworks",
         "base_url": "https://api.fireworks.ai/inference/v1",
         "needs_key": True,
     },
     "cerebras": {
-        "label": "Cerebras",
         "label_key": "provider.template.cerebras",
         "base_url": "https://api.cerebras.ai/v1",
         "needs_key": True,
     },
     "ollama": {
-        "label": "Ollama",
         "label_key": "provider.template.ollama",
         "base_url": "http://127.0.0.1:11434/v1",
         "needs_key": False,
     },
     "codex": {
-        "label": "Codex / ChatGPT",
         "label_key": "provider.template.codex",
         "base_url": "https://chatgpt.com/backend-api/codex",
         "needs_key": False,
@@ -184,7 +180,6 @@ PRESETS: dict[str, dict[str, Any]] = {
         "note_key": "provider.codex_note",
     },
     "custom": {
-        "label": "custom",
         "label_key": "provider.template.custom",
         "base_url": "",
         "needs_key": False,
@@ -218,7 +213,6 @@ def is_preset(entry: dict[str, Any] | None) -> bool:
 
 
 def _clean_members(raw: Any, known: set[str], owner_id: str) -> list[str]:
-    """Tiene solo riferimenti esistenti, senza auto-riferimenti ne' duplicati."""
     out: list[str] = []
     if isinstance(raw, list):
         for mid in raw:
@@ -304,7 +298,7 @@ class Store:
         for entry in self.config["routes"]:
             if is_preset(entry):
                 entry["members"] = _clean_members(entry.get("members"), known, entry["id"])
-                entry.setdefault("label", "Preset")
+                entry.setdefault("label", static_text("internal.default_preset_label"))
                 entry.setdefault("enabled", True)
                                                                          
                                                                                             
@@ -391,7 +385,6 @@ def append_session_log(
     detail_key: str | None = None,
     detail_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Append a language-neutral event to the in-memory session log."""
     store._log_seq += 1
     route = store.route(route_id) if route_id else None
     provider = store.provider(route["provider_id"]) if route else None
@@ -430,7 +423,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Local LLM Router",
+    title=static_text("meta.api_title"),
     version=APP_VERSION,
     lifespan=lifespan,
     default_response_class=FastJSONResponse,
@@ -505,16 +498,10 @@ _SLUG_RE = re.compile(r"[^A-Za-z0-9._:@/-]+")
 
 def _slugify_model_id(raw: str) -> str:
     slug = _SLUG_RE.sub("-", raw.strip()).strip("-")
-    return slug or "model"
+    return slug or static_text("internal.default_model_id")
 
 
 def exposed_models() -> list[dict[str, Any]]:
-    """Un id stabile e univoco per ogni route abilitata.
-
-    L'id preferito e' l'etichetta scelta dall'utente; se due route collidono si
-    aggiunge un suffisso derivato dall'id interno, cosi resta deterministico tra
-    un riavvio e l'altro.
-    """
     key = hash(
         tuple(
             (
@@ -534,7 +521,7 @@ def exposed_models() -> list[dict[str, Any]]:
     for route in store.config["routes"]:
         if is_preset(route):
             members = expand_chain([route])
-            candidate = _slugify_model_id(str(route.get("label") or "preset"))
+            candidate = _slugify_model_id(str(route.get("label") or static_text("internal.default_preset_label")))
             if candidate.lower() in taken or candidate.lower() in VIRTUAL_MODEL_ALIASES:
                 candidate = f"{candidate}-{route['id'][:6]}"
             taken.add(candidate.lower())
@@ -545,7 +532,7 @@ def exposed_models() -> list[dict[str, Any]]:
                     "kind": PRESET_KIND,
                     "model": "",
                     "members": [r["id"] for r, _ in members],
-                    "provider_name": "Preset",
+                    "provider_name": static_text("internal.preset_provider_name"),
                     "provider_id": "",
                                                                                
                                                                         
@@ -623,7 +610,6 @@ def models_payload() -> dict[str, Any]:
 
 
 def resolve_requested_route(requested: Any) -> str | None:
-    """Mappa il campo model della richiesta su una route. None = failover normale."""
     if bool(store.config["settings"].get("override_client_model", False)):
         return None
     if not isinstance(requested, str):
@@ -720,7 +706,6 @@ def _expand_into(
 def expand_chain(
     entries: list[dict[str, Any] | None], only_enabled: bool = True
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """Voci miste (modelli + preset) -> lista piatta di route concrete, in ordine."""
     by_id = {r["id"]: r for r in store.config["routes"]}
     out: list[tuple[dict[str, Any], dict[str, Any]]] = []
     _expand_into(entries, by_id, only_enabled, set(), out)
@@ -816,11 +801,6 @@ def remember_success(
         store.active_member_by_preset[active_item_id] = concrete_route_id
 
 def compact_messages(messages: Any, limit: int) -> Any:
-    """Preserva system/developer e limita il resto al contesto recente.
-
-    Evita di troncare nel mezzo di un blocco tool: se il primo elemento scelto e'
-    role=tool, retrocede fino all'assistant che ha aperto le tool_calls.
-    """
     if not isinstance(messages, list) or limit <= 0:
         return messages
 
@@ -861,10 +841,7 @@ def prepare_body(original: dict[str, Any], model: str, endpoint: str, is_fallbac
 
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
-CODEX_INSTRUCTIONS = (
-    "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI "
-    "on a user's computer."
-)
+CODEX_INSTRUCTIONS = static_text("internal.codex_instructions")
                                                                                  
                              
 CODEX_REFRESH_MARGIN_S = 300.0
@@ -879,7 +856,6 @@ def codex_home() -> Path:
 
 
 def _jwt_claims(token: str) -> dict[str, Any]:
-    """Legge il payload di un JWT senza verificarne la firma (serve solo exp/account)."""
     try:
         part = token.split(".")[1]
         padded = part + "=" * (-len(part) % 4)
@@ -894,7 +870,6 @@ class CodexAuthError(RuntimeError):
 
 
 class CodexAuth:
-    """Carica, aggiorna e riscrive i token OAuth di Codex."""
 
     _instances: dict[str, CodexAuth] = {}
 
@@ -1076,7 +1051,6 @@ def _text_of(content: Any) -> str:
 
 
 def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
-    """Converte un body Chat Completions nel formato Responses accettato da Codex."""
     extra_instructions: list[str] = []
     items: list[dict[str, Any]] = []
 
@@ -1158,8 +1132,6 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_codex_responses_body(body: dict[str, Any]) -> dict[str, Any]:
-    """Il backend Codex accetta solo store=false + stream=true e rifiuta
-    previous_response_id e i limiti di token."""
     out = dict(body)
     out["store"] = False
     out["stream"] = True
@@ -1172,7 +1144,6 @@ def sanitize_codex_responses_body(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sse_events(buffer: str) -> tuple[list[dict[str, Any]], str]:
-    """Estrae gli eventi SSE completi, restituendo anche il resto non terminato."""
     events: list[dict[str, Any]] = []
     while True:
         idx = buffer.find("\n\n")
@@ -1196,7 +1167,6 @@ def _sse_events(buffer: str) -> tuple[list[dict[str, Any]], str]:
 
 
 class ResponsesToChatTranslator:
-    """Trasforma lo stream Responses di Codex in chunk Chat Completions."""
 
     def __init__(self, model: str) -> None:
         self.model = model
@@ -1322,7 +1292,6 @@ def upstream_headers(provider: dict[str, Any]) -> dict[str, str]:
 
 
 async def build_headers(provider: dict[str, Any]) -> dict[str, str]:
-    """Header upstream, risolvendo l'OAuth Codex quando serve."""
     headers = upstream_headers(provider)
     if provider_auth_mode(provider) == "codex_oauth":
         access, account = await codex_auth_for(provider).credentials(store.http())
@@ -1337,7 +1306,6 @@ async def build_headers(provider: dict[str, Any]) -> dict[str, str]:
 
 
 def codex_plan(endpoint: str, body: dict[str, Any]) -> tuple[str, dict[str, Any], bool]:
-    """(endpoint upstream, body adattato, serve traduzione della risposta)."""
     if endpoint in {"chat/completions", "completions"}:
         return "responses", chat_to_responses(body), True
     return "responses", sanitize_codex_responses_body(body), False
@@ -1533,7 +1501,6 @@ async def codex_collect(
     timeout: httpx.Timeout,
     translate: bool,
 ) -> tuple[bytes, str | None]:
-    """Consuma lo stream Codex e restituisce una risposta JSON completa."""
     tr = ResponsesToChatTranslator(model)
     raw = bytearray()
     request = client.build_request("POST", url, headers=headers, json=body, timeout=timeout)
@@ -1606,7 +1573,8 @@ async def proxy_nonstreaming(
             route_id=route["id"],
             message_params={"number": index + 1, "label": route.get("label") or route["model"]},
             request_id=track.get("id") if track is not None else None,
-            detail=f"provider={provider.get('name', '')} · model={route['model']} · endpoint={endpoint}",
+            detail_key="log.attempt_detail",
+            detail_params={"provider": provider.get("name", ""), "model": route["model"], "endpoint": endpoint},
         )
         started = time.perf_counter()
         try:
@@ -1694,14 +1662,12 @@ async def proxy_nonstreaming(
 
 
 async def _prime_sse(iterator: AsyncIterator[bytes], first_token_timeout: float) -> bytes:
-    """Attende il primo evento SSE utile, per poter fare failover prima di inviare
-    qualsiasi byte al client."""
     buffered = bytearray()
     deadline = time.monotonic() + first_token_timeout
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("Timeout in attesa del primo token")
+            raise TimeoutError(text("error.first_token_timeout"))
         try:
             chunk = await asyncio.wait_for(anext(iterator), timeout=remaining)
         except StopAsyncIteration as exc:
@@ -1759,7 +1725,8 @@ async def proxy_streaming(
             route_id=route["id"],
             message_params={"number": index + 1, "label": route.get("label") or route["model"]},
             request_id=track.get("id") if track is not None else None,
-            detail=f"provider={provider.get('name', '')} · model={route['model']} · endpoint={endpoint} · streaming",
+            detail_key="log.attempt_detail_stream",
+            detail_params={"provider": provider.get("name", ""), "model": route["model"], "endpoint": endpoint},
         )
         started = time.perf_counter()
         response: httpx.Response | None = None
@@ -1874,7 +1841,6 @@ def router_api_key() -> str:
 
 
 def require_router_api_key(request: Request) -> None:
-    """Richiede autenticazione solo quando e' configurata una chiave locale."""
     expected = router_api_key()
     if not expected:
         return
@@ -2008,7 +1974,11 @@ def _run_system(args: list[str], timeout: float = 10.0) -> subprocess.CompletedP
 def _service_unit_text() -> str:
     py = _systemd_quote(sys.executable)
     script = _systemd_quote(str(Path(__file__).resolve()))
-    return f"""[Unit]\nDescription={APP_NAME}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={py} {script}\nRestart=on-failure\nRestartSec=3\nEnvironment=PYTHONUNBUFFERED=1\n\n[Install]\nWantedBy=default.target\n"""
+    try:
+        template = SERVICE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(SERVICE_TEMPLATE_PATH.name) from exc
+    return template.replace("__APP_NAME__", APP_NAME).replace("__PYTHON__", py).replace("__SCRIPT__", script)
 
 
 def _require_systemd() -> None:
@@ -2100,7 +2070,6 @@ async def disable_linger() -> dict[str, Any]:
 
 @app.get("/api/live")
 async def api_live() -> dict[str, Any]:
-    """Stato leggero per il polling della UI: chi sta rispondendo adesso."""
     now = time.time()
     exposed = {e["route_id"]: e["exposed_id"] for e in exposed_models()}
     in_flight = [
@@ -2147,7 +2116,6 @@ async def api_live() -> dict[str, Any]:
 
 @app.get("/api/logs")
 async def api_logs(after: int = 0) -> dict[str, Any]:
-    """Restituisce solo le righe di log successive all'ID indicato."""
     rows = [row for row in store.logs if int(row.get("id", 0)) > max(0, int(after))]
     return {
         "logs": rows,
@@ -2158,7 +2126,6 @@ async def api_logs(after: int = 0) -> dict[str, Any]:
 
 @app.delete("/api/logs")
 async def clear_api_logs() -> dict[str, Any]:
-    """Pulisce solo la finestra/log in memoria della sessione corrente."""
     store.logs.clear()
     return {"ok": True, "last_id": store._log_seq, "count": 0}
 
@@ -2266,7 +2233,6 @@ async def add_model(provider_id: str, payload: ModelCreate) -> dict[str, Any]:
 
 
 def _validated_members(raw: list[str], owner_id: str) -> list[str]:
-    """Membri esistenti, senza duplicati, auto-riferimenti o cicli fra preset."""
     by_id = {r["id"]: r for r in store.config["routes"]}
     if any(m not in by_id for m in raw):
         raise HTTPException(404, text("error.member_missing"))
@@ -2313,7 +2279,7 @@ async def patch_preset(preset_id: str, payload: PresetPatch) -> dict[str, Any]:
         raise HTTPException(404, text("error.preset_not_found"))
     assert preset is not None
     if payload.label is not None:
-        preset["label"] = payload.label.strip() or preset.get("label") or "Preset"
+        preset["label"] = payload.label.strip() or preset.get("label") or static_text("internal.default_preset_label")
     if payload.members is not None:
         preset["members"] = _validated_members(payload.members, preset_id)
     if payload.enabled is not None:
@@ -2457,7 +2423,7 @@ async def test_route(route_id: str) -> dict[str, Any]:
 
     body: dict[str, Any] = {
         "model": route["model"],
-        "messages": [{"role": "user", "content": "Reply only: OK"}],
+        "messages": [{"role": "user", "content": static_text("internal.route_test_prompt")}],
         "max_tokens": 3,
         "temperature": 0,
         "stream": False,
@@ -2514,7 +2480,6 @@ async def test_route(route_id: str) -> dict[str, Any]:
 
 @app.post("/api/routes/test-all")
 async def test_all_routes() -> dict[str, Any]:
-    """Testa tutte le route in parallelo invece che una alla volta."""
     route_ids = [r["id"] for r in store.config["routes"] if not is_preset(r)]
     if not route_ids:
         return {"results": {}, "state": public_state()}
@@ -2535,16 +2500,20 @@ def _load_webui() -> str:
     try:
         return WEBUI_PATH.read_text(encoding="utf-8")
     except OSError as exc:
-        raise RuntimeError(f"Cannot read {WEBUI_PATH.name}: {exc}") from exc
+        raise RuntimeError(WEBUI_PATH.name) from exc
 
 
-HTML = _load_webui().replace("__GISELL_LANGUAGE_PACKS__", json.dumps(LANGUAGE_PACKS, ensure_ascii=False))
+WEBUI_DOCUMENT = _load_webui()
 
+
+@app.get("/api/i18n/{language}")
+async def api_i18n(language: str) -> dict[str, str]:
+    return LANGUAGE_PACKS[_normalize_language(language)]
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return HTML
+    return WEBUI_DOCUMENT
 
 
 if __name__ == "__main__":
