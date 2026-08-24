@@ -11,13 +11,9 @@ The Web UI is available in **Italian and English**, shows live router status and
 
 - IT/EN Web UI with an `IT` / `EN` language button.
 - Presets visually distinguished in the global order.
-- Author, copyright, version and license information in the Web UI.
 - Linux service installation/removal directly from the Web UI.
 - Optional `systemd linger` support for boot startup before login.
 - Preset routing aligned with the global list semantics.
-- A model succeeding inside a preset **does not replace the preset as the active route**.
-- If a model appears inside a preset and later again in the global list, it can be tried again when routing reaches that global position.
-- Unnecessary Python comments removed from the source.
 
 ## Requirements
 
