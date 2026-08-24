@@ -7,11 +7,6 @@ GISELL Router is a local LLM router with an OpenAI-compatible API. It lets you c
 
 The Web UI is available in **Italian and English**, shows live router status and session logs, manages providers, models and presets, and can install GISELL Router as a **Linux user systemd service**.
 
-<img width="2095" height="852" alt="image" src="https://github.com/user-attachments/assets/39f3422d-affd-4e34-9382-eec8d3af1a9b" />
-
-<img width="2095" height="852" alt="image" src="https://github.com/user-attachments/assets/eb772bca-2331-4628-a30e-903d5445faaf" />
-
-
 ## What's new in version 0.3.0
 
 - IT/EN Web UI with an `IT` / `EN` language button.
@@ -42,14 +37,17 @@ pip install fastapi uvicorn httpx pydantic orjson
 ## Main files
 
 ```text
-router.py          application and Web UI
+router.py          router backend and OpenAI-compatible API
+webui.html         Web UI markup, styles and client logic
+lang_it.json       all Italian user-facing text
+lang_en.json       all English user-facing text
 config.json        providers, models, presets, global order and settings
-secrets.json       provider API keys and local router key (created locally, never distributed)
+secrets.json       provider API keys and local router key (created locally)
 README.md          documentation
 LICENSE            Creative Commons CC BY-NC 4.0 license
 ```
 
-`config.json` must live in the same directory as `router.py`. `secrets.json` is **not distributed**: it is created automatically on first use when needed and must remain local. It is included in `.gitignore` to reduce the risk of publishing credentials.
+`config.json`, `webui.html`, `lang_it.json`, and `lang_en.json` must live in the same directory as `router.py`. `secrets.json` is **not distributed**: it is created automatically on first use when needed and must remain local. It is included in `.gitignore` to reduce the risk of publishing credentials.
 
 ## Quick start
 
