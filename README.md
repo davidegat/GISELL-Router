@@ -582,9 +582,6 @@ Change the port in `config.json` if needed.
 ## License
 
 GISELL Router is released under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)** license.
-
-The license permits sharing and adaptation for non-commercial purposes, provided proper attribution is given, changes are indicated, and the license reference is retained. Commercial use is not granted by CC BY-NC 4.0 and requires a separate agreement with the author.
-
-Because it contains the NonCommercial restriction, **CC BY-NC 4.0 is not an OSI-approved open-source license**. Creative Commons also recommends against using CC licenses for software; this choice is intentional for GISELL Router.
+Commercial use is not granted by CC BY-NC 4.0 and requires a separate agreement with the author.
 
 See [LICENSE](LICENSE).
