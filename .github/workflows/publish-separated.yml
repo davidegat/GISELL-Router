@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/publish-separated.yml'
+      - '.publish/trigger'
 
 permissions:
   contents: write
