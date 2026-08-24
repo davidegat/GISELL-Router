@@ -7,6 +7,11 @@ GISELL Router is a local LLM router with an OpenAI-compatible API. It lets you c
 
 The Web UI is available in **Italian and English**, shows live router status and session logs, manages providers, models and presets, and can install GISELL Router as a **Linux user systemd service**.
 
+<img width="2129" height="1201" alt="image" src="https://github.com/user-attachments/assets/ce046d51-4e18-48d6-a3fe-1af6ced91248" />
+
+<img width="2129" height="1201" alt="image" src="https://github.com/user-attachments/assets/9663ea5b-3b6c-4c55-ab87-95e004c16dc2" />
+
+
 ## What's new in version 0.3.0
 
 - IT/EN Web UI with an `IT` / `EN` language button.
