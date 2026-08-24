@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "settings": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "request_timeout_s": 90,
+    "first_token_timeout_s": 45,
+    "cooldown_s": 30,
+    "context_messages_on_failover": 10,
+    "connect_timeout_s": 10,
+    "failover_on_explicit_model": true,
+    "expose_virtual_router_model": true,
+    "override_client_model": false
+  },
+  "providers": [],
+  "routes": [],
+  "active_route_id": null
+}
