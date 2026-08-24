@@ -1,0 +1,17 @@
+# Secrets and local credentials
+secrets.json
+*.secret
+.env
+.env.*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local/runtime files
+*.log
+*.tmp
+.DS_Store
