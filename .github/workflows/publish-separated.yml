@@ -1,0 +1,59 @@
+name: Publish approved separated build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-separated.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct approved ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publish/part00 .publish/part01 .publish/part02 .publish/part03 .publish/part04 .publish/part05 > /tmp/release.b64
+          base64 -d /tmp/release.b64 > /tmp/release.zip
+          echo '914aaacf1ebf27d5ae2e01ed1c1025beb346b6f6c472166c72785a6b7df71d3c  /tmp/release.zip' | sha256sum -c -
+          rm -rf /tmp/release
+          mkdir -p /tmp/release
+          unzip -q /tmp/release.zip -d /tmp/release
+
+      - name: Verify approved source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=/tmp/release/GISELL-Router-0.3.0-separated-test
+          python3 -m py_compile "$SRC/router.py"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('/tmp/release/GISELL-Router-0.3.0-separated-test')
+          it = json.loads((p/'lang_it.json').read_text(encoding='utf-8'))
+          en = json.loads((p/'lang_en.json').read_text(encoding='utf-8'))
+          assert set(it) == set(en), 'language-pack keys differ'
+          py = (p/'router.py').read_text(encoding='utf-8').lower()
+          assert '<html' not in py and '<script' not in py and '<style' not in py
+          PY
+
+      - name: Publish exact approved files
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=/tmp/release/GISELL-Router-0.3.0-separated-test
+          for f in .gitignore LICENSE README.md TEST_NOTES.md config.json gisell-router.service.template lang_en.json lang_it.json requirements.txt router.py run.sh webui.html; do
+            cp "$SRC/$f" "$f"
+          done
+          rm -rf .publish
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Publish fully separated i18n architecture'
+          git push
